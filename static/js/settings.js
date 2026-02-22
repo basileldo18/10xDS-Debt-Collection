@@ -1,5 +1,5 @@
 // ============================================
-// VoxAnalyze Settings Page - JavaScript
+// 10xDS Debt Collection Settings Page - JavaScript
 // ============================================
 
 // Supabase Configuration

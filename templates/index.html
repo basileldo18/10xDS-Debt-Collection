@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VoxAnalyze - Call Analysis Dashboard</title>
+    <title>10xDS Debt Collection Dashboard</title>
     <meta name="description" content="AI-powered call analysis dashboard for sentiment tracking and customer insights">
 
     <!-- Fonts -->
@@ -20,11 +20,12 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 
     <!-- Styles -->
-    <link rel="stylesheet" href="/static/css/style.css?v=5.3">
-    <link rel="stylesheet" href="/static/css/live-chat.css?v=1.0">
-    <link rel="stylesheet" href="/static/css/minutes-translate.css?v=1.4">
-    <link rel="stylesheet" href="/static/css/minutes-fullwidth.css?v=1.0">
+    <link rel="stylesheet" href="/static/css/style.css?v=6.1">
+    <link rel="stylesheet" href="/static/css/live-chat.css?v=4.0">
     <link rel="stylesheet" href="/static/css/summary-translate-btn.css?v=1.0">
+    <link rel="stylesheet" href="/static/css/vapi-widget-custom.css?v=1.0">
+    <link rel="stylesheet" href="/static/css/pending-queue.css?v=2.0">
+    <link rel="stylesheet" href="/static/css/modal-premium.css?v=1.0">
 </head>
 
 <body>
@@ -44,7 +45,7 @@
             <div class="loader-spinner"></div>
             <div class="loader-logo">
                 <i class="fa-solid fa-wave-square"></i>
-                <span>VoxAnalyze</span>
+                <span>10xDS Debt Collection</span>
             </div>
             <p>Analyzing your data...</p>
         </div>
@@ -66,7 +67,7 @@
                     <div class="logo-icon">
                         <i class="fa-solid fa-wave-square"></i>
                     </div>
-                    <span class="logo-text">VoxAnalyze</span>
+                    <span class="logo-text">10xDS Debt Collection</span>
                 </div>
 
                 <ul class="nav-links">
@@ -91,6 +92,12 @@
                                 style="display:none; background: #ef4444;">Live</span>
                         </a>
                     </li>
+                    <li class="nav-item" data-section="pending-list">
+                        <a href="#pending-list-section" class="nav-link" id="nav-pending-list">
+                            <i class="fa-solid fa-list-ul"></i>
+                            <span>Pending List</span>
+                        </a>
+                    </li>
                 </ul>
             </div>
 
@@ -112,6 +119,35 @@
                 </div>
 
                 <div class="header-right">
+                    <!-- NEW: Analytics Filter Container (Moved to Right) -->
+                    <div class="header-filters" id="analytics-filters-container" style="display: none;">
+                        <div class="custom-dropdown" id="custom-time-filter">
+                            <button class="dropdown-trigger" id="time-filter-trigger">
+                                <i class="fa-regular fa-calendar dropdown-icon"></i>
+                                <span class="selected-text" id="time-filter-text">Last 30 Days</span>
+                                <i class="fa-solid fa-chevron-down chevron-icon"></i>
+                            </button>
+                            <div class="dropdown-menu" id="time-filter-menu">
+                                <div class="dropdown-item" data-value="1">
+                                    <span class="item-text">Today</span>
+                                    <i class="fa-solid fa-check check-icon"></i>
+                                </div>
+                                <div class="dropdown-item" data-value="7">
+                                    <span class="item-text">Last 7 Days</span>
+                                    <i class="fa-solid fa-check check-icon"></i>
+                                </div>
+                                <div class="dropdown-item active" data-value="30">
+                                    <span class="item-text">Last 30 Days</span>
+                                    <i class="fa-solid fa-check check-icon"></i>
+                                </div>
+                                <div class="dropdown-item" data-value="0">
+                                    <span class="item-text">All Time</span>
+                                    <i class="fa-solid fa-check check-icon"></i>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Modern Theme Toggle Slider -->
                     <div class="theme-toggle-modern">
                         <input type="checkbox" id="theme-toggle-checkbox" class="theme-toggle-checkbox">
@@ -188,21 +224,27 @@
 
                 <div class="stat-card">
                     <div class="stat-icon green">
-                        <i class="fa-solid fa-face-smile"></i>
+                        <i class="fa-solid fa-user-check"></i>
                     </div>
                     <div class="stat-content">
-                        <span class="stat-label">Positive</span>
-                        <h3 class="stat-value" id="positive-percent">0%</h3>
+                        <span class="stat-label">
+                            <span class="full-label">Right Party Contact</span>
+                            <span class="short-label">RPC</span>
+                        </span>
+                        <h3 class="stat-value" id="rpc-stat">0%</h3>
                     </div>
                 </div>
 
                 <div class="stat-card">
                     <div class="stat-icon red">
-                        <i class="fa-solid fa-face-frown"></i>
+                        <i class="fa-solid fa-hand-holding-dollar"></i>
                     </div>
                     <div class="stat-content">
-                        <span class="stat-label">Negative</span>
-                        <h3 class="stat-value" id="negative-percent">0%</h3>
+                        <span class="stat-label">
+                            <span class="full-label">Promise to Pay</span>
+                            <span class="short-label">PTP</span>
+                        </span>
+                        <h3 class="stat-value" id="ptp-stat">0%</h3>
                     </div>
                 </div>
 
@@ -215,33 +257,22 @@
                         <h3 class="stat-value" id="avg-duration">--:--</h3>
                     </div>
                 </div>
-            </section>
 
-            <!-- LIVE CALLS SECTION (Hidden by default) -->
-            <section class="content-section" id="live-calls-section" style="display: none;">
-                <div class="section-header">
-                    <h2>Live & Recent Calls</h2>
-                    <button class="btn btn-primary" id="refresh-live-calls">
-                        <i class="fa-solid fa-rotate-right"></i> Refresh
-                    </button>
-                </div>
-
-                <div class="table-container">
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Status</th>
-                                <th>Call ID</th>
-                                <th>Started At</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="live-calls-table-body">
-                            <!-- Rows injected here via JS -->
-                        </tbody>
-                    </table>
+                <!-- NEW: Cases Solved Card -->
+                <div class="stat-card">
+                    <div class="stat-icon green">
+                        <i class="fa-solid fa-circle-check"></i>
+                    </div>
+                    <div class="stat-content">
+                        <span class="stat-label">Cases Resolved</span>
+                        <h3 class="stat-value" id="cases-resolved">0</h3>
+                    </div>
                 </div>
             </section>
+
+
+
+
 
             <!-- Charts and Analytics Row -->
             <section class="charts-row" id="analytics-section">
@@ -319,6 +350,162 @@
                         </div>
                     </div>
                 </div>
+
+                <!-- Risk Assessment Card -->
+                <div class="chart-card risk-assessment-card">
+                    <div class="card-header">
+                        <div class="header-info">
+                            <h2><i class="fa-solid fa-triangle-exclamation"></i> Risk Assessment</h2>
+                            <p class="card-subtitle">AI-driven risk scoring</p>
+                        </div>
+                        <button class="card-action-btn">
+                            <i class="fa-solid fa-shield-halved"></i>
+                        </button>
+                    </div>
+                    <div class="risk-card-body">
+                        <div class="risk-item high">
+                            <div class="risk-item-header">
+                                <span class="risk-label">High Risk %</span>
+                                <span class="risk-value" id="risk-high-percent">0.5%</span>
+                            </div>
+                            <div class="risk-item-sub" id="risk-high-amount">$150 Total</div>
+                        </div>
+                        <div class="risk-item medium">
+                            <div class="risk-item-header">
+                                <span class="risk-label">Medium Risk %</span>
+                                <span class="risk-value" id="risk-medium-percent">3.2%</span>
+                            </div>
+                            <div class="risk-item-sub" id="risk-medium-amount">$550 Total</div>
+                        </div>
+                        <div class="risk-item low">
+                            <div class="risk-item-header">
+                                <span class="risk-label">Low Risk %</span>
+                                <span class="risk-value" id="risk-low-percent">96.3%</span>
+                            </div>
+                            <div class="risk-item-sub" id="risk-low-amount">$3,500 Total</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Collection Performance Section (NEW) -->
+            <section class="performance-chart-row" id="performance-section" style="margin-bottom: 24px;">
+                <!-- Chart 1: Collection Performance (FULL WIDTH) -->
+                <div class="chart-card performance-analysis-card"
+                    style="width: 100%; min-height: 350px; margin-bottom: 24px;">
+                    <div class="card-header"
+                        style="justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 15px;">
+                        <div class="header-info">
+                            <h2
+                                style="display: flex; align-items: center; gap: 10px; font-size: 1.1rem; color: var(--text-primary);">
+                                <i class="fa-solid fa-chart-line" style="color: var(--accent-primary);"></i>
+                                Collection Performance Over Time
+                            </h2>
+                            <p class="card-subtitle"
+                                style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;">Monthly trend
+                                of dues vs collections</p>
+                        </div>
+                        <div class="chart-legend-inline" id="performance-chart-legend"
+                            style="display: flex; gap: 20px; font-size: 0.8rem; align-items: center;">
+                            <span class="legend-item"
+                                style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary);">
+                                <span
+                                    style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: #ef4444;"></span>
+                                Total Due
+                            </span>
+                            <span class="legend-item"
+                                style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary);">
+                                <span
+                                    style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: #22c55e;"></span>
+                                Collected
+                            </span>
+                            <span class="legend-item"
+                                style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary);">
+                                <span
+                                    style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background-color: #f59e0b; border: 1px dashed #f59e0b;"></span>
+                                Balance
+                            </span>
+                        </div>
+                    </div>
+                    <div class="performance-card-body" style="height: 300px; position: relative; width: 100%;">
+                        <canvas id="performance-line-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Bottom Row: 2 Charts Side by Side -->
+                <div class="charts-bottom-row">
+                    <!-- Chart 2: Calls vs Payments -->
+                    <div class="chart-card calls-payments-card" style="width: 100%; min-height: 350px;">
+                        <div class="card-header"
+                            style="justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 15px;">
+                            <div class="header-info">
+                                <h2
+                                    style="display: flex; align-items: center; gap: 10px; font-size: 1.1rem; color: var(--text-primary);">
+                                    <i class="fa-solid fa-chart-simple" style="color: var(--accent-primary);"></i>
+                                    Calls vs Payments
+                                </h2>
+                                <p class="card-subtitle"
+                                    style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;">Weekly
+                                    activity breakdown</p>
+                            </div>
+                            <div class="chart-legend-inline"
+                                style="display: flex; gap: 20px; font-size: 0.8rem; align-items: center;">
+                                <span class="legend-item"
+                                    style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary);">
+                                    <span
+                                        style="display: inline-block; width: 8px; height: 8px; border-radius: 4px; background-color: #6366f1;"></span>
+                                    Calls
+                                </span>
+                                <span class="legend-item"
+                                    style="display: flex; align-items: center; gap: 6px; color: var(--text-secondary);">
+                                    <span
+                                        style="display: inline-block; width: 8px; height: 8px; border-radius: 4px; background-color: #a855f7;"></span>
+                                    Payments
+                                </span>
+                            </div>
+                        </div>
+                        <div class="performance-card-body" style="height: 300px; position: relative; width: 100%;">
+                            <canvas id="calls-vs-payments-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Chart 3: Conversion Funnel (NEW) -->
+                    <div class="chart-card conversion-funnel-card" style="width: 100%; min-height: 350px;">
+                        <div class="card-header"
+                            style="justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 15px;">
+                            <div class="header-info">
+                                <h2
+                                    style="display: flex; align-items: center; gap: 10px; font-size: 1.1rem; color: var(--text-primary);">
+                                    <i class="fa-solid fa-filter" style="color: var(--accent-primary);"></i>
+                                    Conversion Funnel
+                                </h2>
+                                <p class="card-subtitle"
+                                    style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 4px;">Call data
+                                    flow efficiency</p>
+                            </div>
+                        </div>
+                        <div class="performance-card-body" style="height: 300px; position: relative; width: 100%;">
+                            <canvas id="conversion-funnel-chart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Compliance Adherence Chart (New Full Width) -->
+                <div class="chart-card compliance-card" style="width: 100%; min-height: 300px; margin-top: 24px;">
+                    <div class="card-header"
+                        style="justify-content: space-between; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 15px;">
+                        <div class="header-info">
+                            <h2
+                                style="display: flex; align-items: center; gap: 10px; font-size: 1.1rem; color: var(--text-primary);">
+                                <i class="fa-solid fa-shield-halved" style="color: var(--text-primary);"></i>
+                                Compliance Adherence
+                            </h2>
+                        </div>
+                    </div>
+                    <div class="performance-card-body" style="height: 250px; position: relative; width: 100%;">
+                        <canvas id="compliance-chart"></canvas>
+                    </div>
+                </div>
             </section>
 
             <!-- Calls Table Section -->
@@ -353,20 +540,22 @@
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th>
-                                        <span>File Name</span>
-                                        <i class="fa-solid fa-sort sort-icon"></i>
+                                    <th class="col-call-id">
+                                        <span>Call ID</span>
                                     </th>
-                                    <th>
+                                    <th class="col-customer">
+                                        <span>Customer Name</span>
+                                    </th>
+                                    <th class="col-date">
                                         <span>Date & Time</span>
-                                        <i class="fa-solid fa-sort sort-icon"></i>
                                     </th>
-                                    <th>Duration</th>
-                                    <th>Sentiment</th>
-                                    <th>Tags</th>
-                                    <th>Summary</th>
-                                    <th>Email</th>
-                                    <th>Actions</th>
+
+                                    <th class="col-duration">Duration</th>
+                                    <th class="col-sentiment">Sentiment</th>
+                                    <th class="col-payment">Payment Status</th>
+                                    <th class="col-balance">Balance</th>
+                                    <th class="col-medium">Medium</th>
+                                    <th class="col-actions">Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="calls-table-body">
@@ -376,7 +565,7 @@
                     </div>
 
                     <!-- Empty State -->
-                    <div class="empty-state" id="empty-state" style="display: none;">
+                    <div class="empty-state" id="calls-empty-state" style="display: none;">
                         <div class="empty-icon">
                             <i class="fa-solid fa-folder-open"></i>
                         </div>
@@ -405,39 +594,276 @@
 
             <!-- Live Calls Section -->
             <section class="table-section section-hidden" id="live-calls-section" style="display: none;">
-                <div class="section-header">
-                    <h2>Live Active Calls</h2>
-                    <div class="table-controls">
-                        <div class="live-indicator-badge pulse"
-                            style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; background: rgba(34, 197, 94, 0.1); color: #22c55e; border-radius: 20px; font-size: 0.85rem; font-weight: 600; margin-right: 12px;">
-                            <i class="fa-solid fa-circle" style="font-size: 8px;"></i> Live Updates
+
+                <!-- Section Header -->
+                <div class="section-header"
+                    style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.06);">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div
+                            style="width: 3px; height: 28px; background: linear-gradient(180deg, #6366f1, #a855f7); border-radius: 4px;">
                         </div>
-                        <button class="refresh-btn" id="refresh-live-calls">
-                            <i class="fa-solid fa-rotate"></i>
-                            Refresh
+                        <div>
+                            <h2
+                                style="font-size: 1.3rem; font-weight: 700; color: var(--text-primary); margin: 0; letter-spacing: -0.3px;">
+                                Live Active Calls</h2>
+                            <p style="margin: 2px 0 0; font-size: 0.8rem; color: var(--text-secondary);">Real-time debt
+                                collection monitoring</p>
+                        </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 10px;">
+                        <!-- Live Badge -->
+                        <div class="live-indicator-badge"
+                            style="display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.25); color: #22c55e; border-radius: 20px; font-size: 0.8rem; font-weight: 600;">
+                            <span
+                                style="display: inline-block; width: 7px; height: 7px; background: #22c55e; border-radius: 50%; animation: liveCallPulse 1.5s infinite;"></span>
+                            Live Updates
+                        </div>
+                        <!-- Refresh Button -->
+                        <button class="refresh-btn" id="refresh-live-calls"
+                            style="display: inline-flex; align-items: center; gap: 7px; padding: 6px 14px; background: transparent; border: 1px solid rgba(255,255,255,0.1); color: var(--text-secondary); border-radius: 8px; font-size: 0.82rem; font-weight: 500; cursor: pointer; transition: all 0.2s;">
+                            <i class="fa-solid fa-rotate" style="font-size: 0.75rem;"></i> Refresh
                         </button>
                     </div>
                 </div>
 
-                <div class="table-card">
-                    <div class="table-container">
-                        <table class="data-table">
+                <!-- Calls Card -->
+                <div class="live-calls-card"
+                    style="background: var(--card-bg); border: 1px solid rgba(255,255,255,0.07); border-radius: 14px; overflow: hidden;">
+                    <div class="table-container" style="overflow-x: auto;">
+                        <table class="data-table live-calls-table"
+                            style="width: 100%; border-collapse: collapse; font-size: 0.875rem;">
                             <thead>
-                                <tr>
-                                    <th width="15%">Status</th>
-                                    <th width="25%">Call ID</th>
-                                    <th width="40%">Started At</th>
-                                    <th width="20%">Actions</th>
+                                <tr style="border-bottom: 1px solid rgba(255,255,255,0.06);">
+                                    <th
+                                        style="padding: 14px 20px; text-align: left; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); width: 12%;">
+                                        Status</th>
+                                    <th
+                                        style="padding: 14px 20px; text-align: left; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); width: 28%;">
+                                        Call ID</th>
+                                    <th
+                                        style="padding: 14px 20px; text-align: left; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); width: 40%;">
+                                        Started At</th>
+                                    <th
+                                        style="padding: 14px 20px; text-align: right; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-secondary); width: 20%;">
+                                        Actions</th>
                                 </tr>
                             </thead>
                             <tbody id="live-calls-table-body">
-                                <tr>
-                                    <td colspan="4"
-                                        style="text-align: center; padding: 40px; color: var(--text-secondary);">
-                                        <div class="loading-spinner"
-                                            style="margin: 0 auto 10px; width: 24px; height: 24px; border: 2px solid #ddd; border-top-color: var(--primary-color); border-radius: 50%; animation: spin 1s linear infinite;">
+                                <!-- Default connecting state shown on load -->
+                                <tr id="live-calls-connecting-row">
+                                    <td colspan="4" style="text-align: center; padding: 56px 20px;">
+                                        <div
+                                            style="display: flex; flex-direction: column; align-items: center; gap: 14px;">
+                                            <div style="position: relative; width: 52px; height: 52px;">
+                                                <div
+                                                    style="position: absolute; inset: 0; border-radius: 50%; background: rgba(99, 102, 241, 0.12); animation: liveCallRing 2s ease-out infinite;">
+                                                </div>
+                                                <div
+                                                    style="position: absolute; inset: 6px; border-radius: 50%; background: rgba(99, 102, 241, 0.2); display: flex; align-items: center; justify-content: center;">
+                                                    <i class="fa-solid fa-headset"
+                                                        style="color: #6366f1; font-size: 1.1rem;"></i>
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <p
+                                                    style="font-size: 0.95rem; font-weight: 600; color: var(--text-primary); margin: 0 0 4px;">
+                                                    Connecting to live feed...</p>
+                                                <p style="font-size: 0.8rem; color: var(--text-secondary); margin: 0;">
+                                                    Establishing real-time connection</p>
+                                            </div>
                                         </div>
-                                        <p>Connecting to real-time feed...</p>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Inline styles for live calls, scoped to avoid pollution -->
+                <style>
+                    @keyframes liveCallPulse {
+
+                        0%,
+                        100% {
+                            opacity: 1;
+                            transform: scale(1);
+                        }
+
+                        50% {
+                            opacity: 0.5;
+                            transform: scale(1.3);
+                        }
+                    }
+
+                    @keyframes liveCallRing {
+                        0% {
+                            transform: scale(0.8);
+                            opacity: 1;
+                        }
+
+                        100% {
+                            transform: scale(1.8);
+                            opacity: 0;
+                        }
+                    }
+
+                    .live-calls-table tbody tr {
+                        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+                        transition: background 0.15s;
+                        cursor: pointer;
+                    }
+
+                    .live-calls-table tbody tr:last-child {
+                        border-bottom: none;
+                    }
+
+                    .live-calls-table tbody tr:hover {
+                        background: rgba(255, 255, 255, 0.03);
+                    }
+
+                    .live-calls-table td {
+                        padding: 14px 20px;
+                        color: var(--text-primary);
+                        vertical-align: middle;
+                    }
+
+                    .live-badge {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 6px;
+                        padding: 4px 10px;
+                        border-radius: 20px;
+                        font-size: 0.78rem;
+                        font-weight: 600;
+                        background: rgba(34, 197, 94, 0.1);
+                        border: 1px solid rgba(34, 197, 94, 0.25);
+                        color: #22c55e;
+                    }
+
+                    .live-badge .live-dot {
+                        width: 6px;
+                        height: 6px;
+                        border-radius: 50%;
+                        background: #22c55e;
+                        animation: liveCallPulse 1.5s infinite;
+                    }
+
+                    .live-call-id {
+                        font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+                        font-size: 0.8rem;
+                        color: var(--text-secondary);
+                        background: rgba(255, 255, 255, 0.04);
+                        padding: 3px 8px;
+                        border-radius: 6px;
+                        border: 1px solid rgba(255, 255, 255, 0.06);
+                    }
+
+                    .btn-live-view {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 7px;
+                        padding: 6px 14px;
+                        border-radius: 8px;
+                        font-size: 0.8rem;
+                        font-weight: 600;
+                        background: rgba(99, 102, 241, 0.12);
+                        border: 1px solid rgba(99, 102, 241, 0.3);
+                        color: #818cf8;
+                        cursor: pointer;
+                        transition: all 0.2s;
+                    }
+
+                    .btn-live-view:hover {
+                        background: rgba(99, 102, 241, 0.22);
+                        border-color: rgba(99, 102, 241, 0.5);
+                        color: #a5b4fc;
+                        box-shadow: 0 0 12px rgba(99, 102, 241, 0.2);
+                    }
+
+                    #refresh-live-calls:hover {
+                        background: rgba(255, 255, 255, 0.06);
+                        color: var(--text-primary);
+                        border-color: rgba(255, 255, 255, 0.2);
+                    }
+
+                    .live-empty-state {
+                        display: flex;
+                        flex-direction: column;
+                        align-items: center;
+                        gap: 14px;
+                        padding: 56px 20px;
+                        text-align: center;
+                    }
+
+                    .live-empty-icon {
+                        width: 64px;
+                        height: 64px;
+                        border-radius: 50%;
+                        background: rgba(99, 102, 241, 0.08);
+                        border: 1px solid rgba(99, 102, 241, 0.15);
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        box-shadow: 0 0 24px rgba(99, 102, 241, 0.12);
+                    }
+                </style>
+            </section>
+
+
+            <!-- Pending List Section -->
+            <section class="table-section section-hidden" id="pending-list-section" style="display: none;">
+
+                <!-- Premium Section Header -->
+                <div class="pq-section-header">
+                    <div class="pq-header-left">
+                        <div class="pq-icon-wrap">
+                            <i class="fa-solid fa-hourglass-half"></i>
+                        </div>
+                        <div>
+                            <h2 class="pq-title">Pending Analysis Queue</h2>
+                            <p class="pq-subtitle">Calls currently awaiting AI processing</p>
+                        </div>
+                    </div>
+                    <div class="pq-header-actions">
+                        <div class="pq-queue-badge" id="pq-count-badge">
+                            <i class="fa-solid fa-layer-group"></i>
+                            <span id="pq-queue-count">0</span> In Queue
+                        </div>
+                        <button class="pq-btn pq-btn-ghost" id="refresh-pending-list">
+                            <i class="fa-solid fa-rotate"></i> Refresh
+                        </button>
+                        <button class="pq-btn pq-btn-danger" id="clear-pending-list">
+                            <i class="fa-solid fa-trash-can"></i> Clear All
+                        </button>
+                        <button class="pq-btn pq-btn-success" id="upload-excel-btn">
+                            <i class="fa-solid fa-file-arrow-up"></i> Upload Excel
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Premium Table Card -->
+                <div class="pq-card">
+                    <div class="pq-table-wrap">
+                        <table class="pq-table pending-leads-table" id="pending-leads-table">
+                            <thead>
+                                <tr id="pq-table-header-row">
+                                    <th style="width:5%">No.</th>
+                                    <th>File Name</th>
+                                    <th>Uploaded</th>
+                                    <th>Call Scheduled On</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pending-calls-table-body">
+                                <!-- Rendered by JS -->
+                                <tr>
+                                    <td colspan="4">
+                                        <div class="pq-empty-state">
+                                            <div class="pq-empty-icon">
+                                                <i class="fa-solid fa-hourglass-half"></i>
+                                            </div>
+                                            <h3>No Pending Calls</h3>
+                                            <p>Upload an Excel file to add calls to the queue</p>
+                                        </div>
                                     </td>
                                 </tr>
                             </tbody>
@@ -445,6 +871,8 @@
                     </div>
                 </div>
             </section>
+
+
 
             <!-- Reports Section -->
             <section class="reports-section" id="reports-section" style="display: none;">
@@ -708,6 +1136,12 @@
                     </button>
                 </div>
             </section>
+
+            <!-- Analytics Loading Overlay -->
+            <div id="analytics-loader" class="analytics-loading-overlay">
+                <div class="spinner"></div>
+                <p>Updating Analytics...</p>
+            </div>
         </main>
     </div>
 
@@ -718,7 +1152,10 @@
             <div class="modal-header-single">
                 <!-- Left: Title with Speaker Badge -->
                 <div class="modal-title-section">
-                    <i class="fa-solid fa-file-audio modal-icon"></i>
+                    <div class="modal-icon"
+                        style="background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); width:46px; height:46px; border-radius:14px; display:flex; align-items:center; justify-content:center; flex-shrink:0; box-shadow: 0 4px 14px rgba(99,102,241,0.35);">
+                        <i class="fa-solid fa-file-audio" style="color:#fff; font-size:1.1rem;"></i>
+                    </div>
                     <div class="modal-title-info">
                         <div class="title-with-badge">
                             <h2 id="modal-filename">Call Details</h2>
@@ -736,7 +1173,7 @@
                     </div>
                 </div>
 
-                <!-- Right: Audio Player -->
+                <!-- Center: Audio Player -->
                 <div class="modal-audio-section">
                     <audio id="modal-audio" controls>
                         Your browser does not support the audio element.
@@ -751,7 +1188,7 @@
             <!-- Modal Tabs -->
             <div class="modal-tabs">
                 <button class="modal-tab active" data-tab="summary">
-                    <i class="fa-solid fa-align-left"></i>
+                    <i class="fa-solid fa-brain"></i>
                     Summary
                 </button>
                 <button class="modal-tab" data-tab="transcript">
@@ -762,22 +1199,17 @@
                     <i class="fa-solid fa-language"></i>
                     Translation
                 </button>
-                <button class="modal-tab" data-tab="minutes">
-                    <i class="fa-solid fa-clipboard-list"></i>
-                    Meeting Minutes
-                </button>
+
             </div>
 
             <div class="modal-body">
                 <!-- Summary Tab Content -->
                 <div class="tab-content active" id="tab-summary">
-                    <div class="content-section">
-                        <h4><i class="fa-solid fa-brain"></i> AI Summary</h4>
-                        <div class="content-box" id="modal-summary" dir="auto">
+                    <div id="modal-summary" dir="auto">
+                        <div class="content-box">
                             <p>Loading summary...</p>
                         </div>
                     </div>
-
                 </div>
 
                 <!-- Transcript Tab Content -->
@@ -818,15 +1250,7 @@
                     </div>
                 </div>
 
-                <!-- Meeting Minutes Tab Content -->
-                <div class="tab-content" id="tab-minutes">
-                    <div class="content-section">
-                        <h4><i class="fa-solid fa-clipboard-list"></i> Minutes of Meeting</h4>
-                        <div class="content-box meeting-minutes-box" id="modal-minutes" dir="auto">
-                            <p class="minutes-placeholder">Loading meeting minutes...</p>
-                        </div>
-                    </div>
-                </div>
+
             </div>
 
             <div class="modal-footer">
@@ -974,6 +1398,67 @@
         </div>
     </div>
 
+    <!-- Excel Upload Modal -->
+    <div class="modal-overlay" id="excel-upload-modal" style="display: none;">
+        <div class="modal-content upload-modal-content">
+            <div class="modal-header">
+                <div class="modal-title-section">
+                    <i class="fa-solid fa-file-excel modal-icon" style="color: #16a34a;"></i>
+                    <div class="modal-title-info">
+                        <h2>Upload Excel Sheet</h2>
+                        <span class="meta-label">Import calls from an Excel file (.xlsx, .xls, .csv)</span>
+                    </div>
+                </div>
+                <button class="modal-close" id="excel-upload-modal-close">&times;</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- Upload Area -->
+                <div class="upload-area" id="excel-drop-zone"
+                    style="border-color: #16a34a; background: rgba(22, 163, 74, 0.05);">
+                    <div class="upload-icon" style="color: #16a34a; background: rgba(22, 163, 74, 0.1);">
+                        <i class="fa-solid fa-file-import"></i>
+                    </div>
+                    <h3>Drag & Drop Excel File</h3>
+                    <p>or click to browse</p>
+                    <p class="upload-hint">Supported formats: .xlsx, .xls, .csv</p>
+                    <input type="file" id="excel-file-input" accept=".xlsx, .xls, .csv" style="display: none;">
+                </div>
+
+                <!-- Selected File List -->
+                <div class="selected-files-container" id="excel-selected-file-container" style="display: none;">
+                    <div class="files-list-header">
+                        <span>Selected File</span>
+                        <button class="btn-clear-all" id="excel-clear-file">Remove</button>
+                    </div>
+                    <div class="selected-files-list" id="excel-file-info" style="border-left: 4px solid #16a34a;">
+                        <!-- File info will be injected here -->
+                    </div>
+                </div>
+
+                <!-- Progress Section -->
+                <div class="upload-progress-section" id="excel-progress-section" style="display: none;">
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="excel-progress-bar" style="width: 0%; background: #16a34a;"></div>
+                    </div>
+                    <div class="progress-percent-row">
+                        <span class="progress-label" id="excel-status-text">Processing excel sheet...</span>
+                        <span class="progress-percent" id="excel-percent">0%</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="excel-upload-cancel">Cancel</button>
+                <button class="btn btn-primary" id="excel-upload-submit" disabled
+                    style="background: #16a34a; border-color: #16a34a;">
+                    <i class="fa-solid fa-upload"></i>
+                    Upload Sheet
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Real-time Notification Container -->
     <div id="vapi-notification-container" class="notification-container">
         <!-- Dynamic notifications will appear here -->
@@ -1030,7 +1515,38 @@
 
                 <div class="filter-group">
                     <label class="filter-label">Tags</label>
-                    <div class="filter-options tags-selection">
+                    <div class="filter-options tags-selection" id="tags-filter-options">
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="Right Party Contact" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Right Party Contact (RPC)</span>
+                        </label>
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="PTP" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Promise to Pay (PTP)</span>
+                        </label>
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="Refusal" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Refusal</span>
+                        </label>
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="Dispute" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Dispute</span>
+                        </label>
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="Wrong Number" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Wrong Number</span>
+                        </label>
+                        <label class="filter-checkbox-wrapper">
+                            <input type="checkbox" name="tags" value="Callback Requested" checked>
+                            <span class="checkbox-custom"></span>
+                            <span class="checkbox-label">Callback Requested</span>
+                        </label>
+                        <!-- Support/Billing preserved as common categories -->
                         <label class="filter-checkbox-wrapper">
                             <input type="checkbox" name="tags" value="Support" checked>
                             <span class="checkbox-custom"></span>
@@ -1040,31 +1556,6 @@
                             <input type="checkbox" name="tags" value="Billing" checked>
                             <span class="checkbox-custom"></span>
                             <span class="checkbox-label">Billing</span>
-                        </label>
-                        <label class="filter-checkbox-wrapper">
-                            <input type="checkbox" name="tags" value="Technical Issue" checked>
-                            <span class="checkbox-custom"></span>
-                            <span class="checkbox-label">Technical Issue</span>
-                        </label>
-                        <label class="filter-checkbox-wrapper">
-                            <input type="checkbox" name="tags" value="Churn Risk" checked>
-                            <span class="checkbox-custom"></span>
-                            <span class="checkbox-label">Churn Risk</span>
-                        </label>
-                        <label class="filter-checkbox-wrapper">
-                            <input type="checkbox" name="tags" value="Sales" checked>
-                            <span class="checkbox-custom"></span>
-                            <span class="checkbox-label">Sales</span>
-                        </label>
-                        <label class="filter-checkbox-wrapper">
-                            <input type="checkbox" name="tags" value="Feedback" checked>
-                            <span class="checkbox-custom"></span>
-                            <span class="checkbox-label">Feedback</span>
-                        </label>
-                        <label class="filter-checkbox-wrapper">
-                            <input type="checkbox" name="tags" value="Complaint" checked>
-                            <span class="checkbox-custom"></span>
-                            <span class="checkbox-label">Complaint</span>
                         </label>
                     </div>
                 </div>
@@ -1114,6 +1605,84 @@
                     <button class="btn-summary-details" id="btn-view-full-details">
                         <i class="fa-solid fa-eye"></i>
                         View Full Details
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Payment Outcome Modal (Summary) -->
+    <div class="modal-overlay" id="payment-outcome-modal" style="display: none;">
+        <div class="payment-modal-wrapper">
+            <div class="payment-modal-card">
+                <button class="payment-close-icon" onclick="openPaymentModal.close()" aria-label="Close">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+                <div class="payment-modal-header">
+                    <div class="payment-icon">
+                        <i class="fa-solid fa-receipt"></i>
+                    </div>
+                    <div class="payment-header-details">
+                        <h2 class="payment-modal-title">Payment Outcome Analysis</h2>
+                        <p class="payment-modal-subtitle" id="payment-modal-customer">--</p>
+                    </div>
+                    <div class="payment-status-pill" id="payment-modal-status-pill">
+                        <i class="fa-solid fa-circle"></i>
+                        <span id="payment-modal-status-text">Pending</span>
+                    </div>
+                </div>
+
+                <div class="payment-modal-body">
+                    <!-- Metrics Grid -->
+                    <div class="payment-metrics-grid">
+                        <div class="metric-box">
+                            <span class="metric-label">Total Debt</span>
+                            <span class="metric-value" id="pm-total-debt">$0.00</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-label">Amount Collected</span>
+                            <span class="metric-value highlight" id="pm-collected">$0.00</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-label">Remaining Balance</span>
+                            <span class="metric-value danger" id="pm-balance">$0.00</span>
+                        </div>
+                        <div class="metric-box">
+                            <span class="metric-label">Next Payment Date</span>
+                            <span class="metric-value info" id="pm-next-date">N/A</span>
+                        </div>
+                    </div>
+
+                    <!-- AI Summary Section -->
+                    <div class="payment-summary-section">
+                        <h4 class="section-title">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            AI Payment Summary
+                        </h4>
+                        <div class="summary-content" id="payment-modal-summary">
+                            <p>Analyzing payment conversation details...</p>
+                        </div>
+                    </div>
+
+                    <!-- Payment Plan / Settlement Info -->
+                    <div class="settlement-info-box" id="pm-settlement-box" style="display: none;">
+                        <i class="fa-solid fa-calendar-check"></i>
+                        <div class="settlement-text">
+                            <strong>Settlement Agreed:</strong>
+                            <span id="pm-settlement-details">Customer agreed to pay half today and the rest by next
+                                week.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="payment-modal-footer">
+                    <button class="btn-payment-close" onclick="openPaymentModal.close()">
+                        <i class="fa-solid fa-check"></i>
+                        Done
+                    </button>
+                    <button class="btn-payment-transcript" id="btn-pm-view-transcript">
+                        <i class="fa-solid fa-file-lines"></i>
+                        View Transcript
                     </button>
                 </div>
             </div>
@@ -1180,61 +1749,84 @@
         </div>
     </div>
 
-    <!-- Live Transcript Modal (Redesigned) -->
+    <!-- Live Transcript Modal (Theme-Aware) -->
     <div class="modal" id="live-transcript-modal">
         <div class="modal-backdrop" id="live-modal-backdrop"></div>
         <div class="live-chat-modal-content">
-            <div class="chat-container">
-                <!-- Header -->
-                <div class="chat-header">
-                    <button class="chat-back-btn" id="close-live-modal-top">
-                        <i class="fa-solid fa-chevron-left"></i>
-                    </button>
-                    <div class="chat-user-info">
-                        <img src="https://ui-avatars.com/api/?name=AS&background=dcd7ff&color=581c87"
-                            class="chat-avatar-img" id="live-assistant-avatar">
-                        <div class="chat-user-details">
-                            <span class="chat-user-name">Vapi Assistant</span>
-                            <span class="chat-user-status" id="live-connection-status">Active now</span>
-                        </div>
+            <!-- ───── HEADER ───── -->
+            <div class="lct-header">
+                <button class="lct-back-btn" id="close-live-modal-top">
+                    <i class="fa-solid fa-chevron-left"></i>
+                </button>
+                <div class="lct-agent-info">
+                    <div class="lct-agent-avatar">
+                        <span>AG</span>
+                        <span class="lct-avatar-live-dot"></span>
                     </div>
-
-                </div>
-
-                <!-- Body -->
-                <div class="chat-body" id="live-transcript-container">
-                    <div class="chat-date-separator">
-                        <span class="chat-date-text" id="live-chat-date">Today</span>
-                    </div>
-                    <!-- Messages will be injected here -->
-                    <div class="empty-state">
-                        <div class="loader-spinner" style="border-top-color:#9344B3; width:30px; height:30px;"></div>
-                        <p>Waiting for speech...</p>
+                    <div class="lct-agent-details">
+                        <span class="lct-agent-name">AI Agent</span>
+                        <span class="lct-agent-status" id="live-connection-status">
+                            <span class="lct-status-dot"></span>
+                            Live Connected
+                        </span>
                     </div>
                 </div>
-
-                <!-- Footer -->
-                <div class="chat-footer">
-                    <div class="chat-footer-actions">
-                        <button class="chat-btn-secondary" id="close-live-modal-btn">
-                            Close
-                        </button>
-                        <button class="chat-btn-primary" id="copy-live-btn">
-                            <i class="fa-solid fa-copy"></i> Copy Transcript
-                        </button>
-                    </div>
+                <div class="lct-duration-pill" id="lct-duration">
+                    <i class="fa-solid fa-clock"></i>
+                    <span id="lct-timer-display">00:00</span>
                 </div>
+            </div>
+
+            <!-- ───── CALL INFO BAR ───── -->
+            <div class="lct-info-bar">
+                <span class="lct-info-item">
+                    <i class="fa-solid fa-phone"></i>
+                    <span id="lct-call-id-display">Call ID: —</span>
+                </span>
+                <span class="lct-info-divider">|</span>
+                <span class="lct-info-item">
+                    <i class="fa-solid fa-calendar-day"></i>
+                    <span id="live-chat-date">Today</span>
+                </span>
+            </div>
+
+            <!-- ───── TRANSCRIPT BODY ───── -->
+            <div class="lct-body" id="live-transcript-container">
+            </div>
+
+            <!-- ───── LIVE INDICATOR STRIP ───── -->
+            <div class="lct-live-strip">
+                <span class="lct-live-dot-strip"></span>
+                <span class="lct-live-label">Live &bull; Transcribing...</span>
+                <div class="lct-waveform">
+                    <span></span><span></span><span></span><span></span><span></span>
+                </div>
+            </div>
+
+            <!-- ───── FOOTER ───── -->
+            <div class="lct-footer">
+                <button class="lct-btn-close" id="close-live-modal-btn">
+                    <i class="fa-solid fa-xmark"></i> Close
+                </button>
+                <button class="lct-btn-copy" id="copy-live-btn">
+                    <i class="fa-solid fa-copy"></i> Copy Transcript
+                </button>
             </div>
         </div>
     </div>
 
+
+
+
+
     <!-- Toast Notifications Container -->
     <div class="toast-container" id="toast-container"></div>
 
-    <!-- ✅ SIMPLE VAPI WIDGET -->
+    <!-- ✅ SIMPLE VAPI WIDGET (Compact & Responsive) -->
     <vapi-widget public-key="{{ vapi_public_key }}" assistant-id="{{ vapi_assistant_id }}" mode="voice"
         position="bottom-right" theme="light" button-base-color="#3F0067" button-accent-color="#ffffff"
-        base-color="#ffffff" accent-color="#9344B3" style="position: fixed; bottom: 20px; right: 20px; z-index: 9999;">
+        base-color="#ffffff" accent-color="#9344B3"
+        style="position: fixed; bottom: 1rem; right: 1rem; z-index: 9999; transform: scale(0.8); transform-origin: bottom right;">
     </vapi-widget>
 
     <!-- Inject Config from Backend -->
@@ -1247,8 +1839,8 @@
     <script src="https://unpkg.com/@vapi-ai/client-sdk-react/dist/embed/widget.umd.js" async defer></script>
 
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-    <script src="/static/js/main.js?v=4.26"></script>
-    <script src="/static/js/live_calls.js?v=1.5"></script>
+    <script src="/static/js/main.js?v=4.36"></script>
+    <script src="/static/js/live_calls.js?v=2.0"></script>
     <script src="/static/js/vapi_events.js?v=1.0"></script>
 </body>
 

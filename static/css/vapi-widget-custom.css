@@ -1,0 +1,90 @@
+/* VAPI Widget Custom Responsive Styles - COMPACT VERSION */
+
+/* Make widget significantly smaller on all devices */
+vapi-widget {
+    transform: scale(0.7) !important;
+    transform-origin: bottom right !important;
+}
+
+/* Force button text to stay on one line */
+vapi-widget button,
+vapi-widget [role="button"] {
+    white-space: nowrap !important;
+    min-width: auto !important;
+    font-size: 0.8rem !important;
+}
+
+/* Extra small for mobile */
+@media (max-width: 480px) {
+    vapi-widget {
+        transform: scale(0.55) !important;
+        bottom: 0.5rem !important;
+        right: 0.5rem !important;
+    }
+}
+
+/* Small mobile devices */
+@media (min-width: 481px) and (max-width: 768px) {
+    vapi-widget {
+        transform: scale(0.6) !important;
+    }
+}
+
+/* Tablets and up */
+@media (min-width: 769px) {
+    vapi-widget {
+        transform: scale(0.7) !important;
+    }
+}
+
+/* Override shadow DOM button styles */
+vapi-widget::part(button) {
+    white-space: nowrap !important;
+    min-width: 90px !important;
+    width: auto !important;
+    height: auto !important;
+    padding: 10px 16px !important;
+    font-size: 0.8rem !important;
+}
+
+/* Make modal significantly smaller */
+vapi-widget::part(modal) {
+    max-width: 320px !important;
+    max-height: 480px !important;
+    width: 90vw !important;
+}
+
+/* Reduce modal content padding and sizes */
+vapi-widget::part(modal-content) {
+    padding: 1rem !important;
+}
+
+vapi-widget::part(modal-header) {
+    padding: 0.75rem 1rem !important;
+    font-size: 0.9rem !important;
+}
+
+vapi-widget::part(modal-body) {
+    padding: 1rem !important;
+    font-size: 0.85rem !important;
+}
+
+/* Make internal buttons smaller */
+vapi-widget::part(start-button),
+vapi-widget::part(action-button) {
+    padding: 8px 16px !important;
+    font-size: 0.85rem !important;
+}
+
+/* Reduce icon sizes in modal */
+vapi-widget svg,
+vapi-widget i {
+    width: 24px !important;
+    height: 24px !important;
+}
+
+/* Make microphone button smaller */
+vapi-widget[data-state="active"]::part(mic-button) {
+    width: 48px !important;
+    height: 48px !important;
+}

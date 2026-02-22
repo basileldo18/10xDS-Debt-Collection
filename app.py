@@ -23,12 +23,8 @@ from starlette.concurrency import run_in_threadpool
 
 from dotenv import load_dotenv
 
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
-from google.auth.transport.requests import Request as GoogleRequest
-from datetime import datetime
+
+from datetime import datetime, timedelta
 from groq import Groq
 from werkzeug.utils import secure_filename
 
@@ -47,40 +43,33 @@ if GROQ_API_KEY and GROQ_API_KEY != "your_groq_api_key_here":
 else:
     print("[GROQ] Warning: GROQ_API_KEY not set. Using fallback analysis.")
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Move all blocking syncs to a background task so server accepts requests IMMEDIATELY
+    global app_loop
+    app_loop = asyncio.get_running_loop()
+    asyncio.create_task(run_startup_tasks())
+    yield
+
 # --- App Configuration ---
-app = FastAPI(title="VoxAnalyze")
+app = FastAPI(title="10xDS Debt Collection", lifespan=lifespan)
 
 # Session Middleware (replaces Flask's secret_key session)
 SECRET_KEY = os.environ.get("FLASK_SECRET_KEY", "voxanalyze-secret-key-change-in-prod")
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY)
 
-@app.on_event("startup")
-async def startup_event():
-    # Move all blocking syncs to a background task so server accepts requests IMMEDIATELY
-    global app_loop
-    app_loop = asyncio.get_running_loop()
-    asyncio.create_task(run_startup_tasks())
-
 async def run_startup_tasks():
-    print("[STARTUP] Background tasks starting (DB Sync, Drive Sync, Webhook)...")
+    print("[STARTUP] Background tasks starting (DB Sync, Webhook)...")
     try:
-        # 1. Sync seen_ids from Database
-        await run_in_threadpool(sync_seen_ids_from_db)
-        
-        # 2. Sync existing Drive files
-        await run_in_threadpool(sync_drive_state)
-
-        # 3. Start Webhook Manager (Auto-Renew)
-        # We start this as a background loop instead of a single call
-        asyncio.create_task(webhook_renewal_loop())
         print("[STARTUP] Background tasks complete! System ready.")
+
     except Exception as e:
         print(f"[STARTUP] Background task error: {e}")
 
-drive_page_token = None
-app_loop = None
-# Track which Drive files we've already seen/processed
-seen_ids = set()
+
+
 
 def create_notification_event(step, message, status="active", file_id=None):
     """Helper to create standard notification payload."""
@@ -89,153 +78,7 @@ def create_notification_event(step, message, status="active", file_id=None):
     return json.dumps(payload)
 
 
-async def process_drive_file(file_path, filename, drive_file_id, notification_manager):
-    """
-    Async version of audio processing with notifications for Drive uploads.
-    """
-    try:
-        print(f"[PROCESS] Starting async processing for {filename}")
-        
-        # 1. Start Notification
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("drive_import", f"Importing {filename} from Google Drive...", "active"))
 
-        # 2. Transcription
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("transcribe", f"Transcribing audio file: {filename}", "active"))
-            
-        # Run blocking transcribe in threadpool
-        transcript, duration_seconds, diarization_data, speaker_count, detected_lang = await run_in_threadpool(
-            transcribe_audio, file_path
-        )
-        
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("transcribe", f"Transcription complete! Duration: {int(duration_seconds)}s, Speakers: {speaker_count}", "complete"))
-
-        # 3. Analysis
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("analyze", "Analyzing transcript with AI...", "active"))
-            
-        sentiment, tags, summary, speakers = await run_in_threadpool(
-            analyze_transcript, transcript, diarization_data=diarization_data
-        )
-
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("analyze", f"Analysis complete! Sentiment: {sentiment}", "complete"))
-
-        # 4. Upload to Supabase Storage
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("upload", "Uploading audio to Supabase storage...", "active"))
-        
-        # Upload audio file to Supabase storage bucket
-        audio_url = await run_in_threadpool(upload_audio_to_supabase, file_path, filename)
-        
-        # Fallback to Google Drive URL if Supabase upload fails
-        if not audio_url and drive_file_id:
-            audio_url = f"https://drive.google.com/uc?export=download&id={drive_file_id}"
-            print(f"[STORAGE] Using Google Drive URL as fallback")
-            if notification_manager:
-                await notification_manager.broadcast(create_notification_event("upload", "Using Google Drive URL as backup", "complete"))
-        else:
-            if notification_manager:
-                await notification_manager.broadcast(create_notification_event("upload", "Successfully uploaded to Supabase storage!", "complete"))
-
-        # 5. Save Logic (Reused from process_audio_file logic but adapted)
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("save", "Saving to database...", "active"))
-
-        # Patch diarization (copied logic)
-        if speakers and diarization_data:
-            sorted_diarization = sorted(diarization_data, key=lambda x: x.get('start', 0))
-            speaker_map = {}
-            speaker_index = 1
-            for segment in sorted_diarization:
-                orig_id = segment.get('speaker', 'Unknown')
-                if orig_id not in speaker_map:
-                    label = f"Speaker {speaker_index}"
-                    name = speakers.get(label, label)
-                    if isinstance(name, str) and ',' in name:
-                        name = name.split(',')[0].strip()
-                    speaker_map[orig_id] = name
-                    speaker_index += 1
-                segment['display_name'] = speaker_map[orig_id]
-            diarization_data = sorted_diarization
-            if len(speaker_map) > 0:
-                speaker_count = len(speaker_map)
-
-        data = {
-            "filename": filename,
-            "transcript": transcript,
-            "sentiment": sentiment,
-            "tags": tags,
-            "summary": summary,
-            "duration": int(duration_seconds),
-            "email_sent": False,
-            "audio_url": audio_url,
-            "diarization_data": diarization_data,
-            "speaker_count": speaker_count
-        }
-        
-        # Save to DB
-        if supabase:
-             # Check existence first
-            exists = await run_in_threadpool(lambda: supabase.table('calls').select("id").eq("filename", filename).execute())
-            if exists.data:
-                print(f"[DB] Skipping save: {filename} already exists.")
-                if notification_manager:
-                    await notification_manager.broadcast(create_notification_event("save", "File already processed", "complete"))
-                    await notification_manager.broadcast(create_notification_event("done", f"{filename} already exists in database", "success"))
-                return
-
-            # Send Email
-            try:
-                email_sent = await run_in_threadpool(send_email_notification, filename, sentiment, tags, summary)
-                data["email_sent"] = email_sent
-            except Exception:
-                pass
-
-            await run_in_threadpool(lambda: supabase.table('calls').insert(data).execute())
-            print(f"[DB] Saved results for {filename}")
-            
-            # Send save completion notification
-            if notification_manager:
-                await notification_manager.broadcast(create_notification_event("save", "Successfully saved to database!", "complete"))
-
-        # Final success notification
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("done", f"✅ {filename} processed successfully!", "success"))
-            
-    except Exception as e:
-        print(f"[PROCESS] Error in async drive processing: {e}")
-        if notification_manager:
-            await notification_manager.broadcast(create_notification_event("error", f"Error processing {filename}: {str(e)}", "error"))
-    finally:
-        # Cleanup temp file
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                print(f"[CLEANUP] Removed temp file: {file_path}")
-            except Exception as cleanup_err:
-                print(f"[CLEANUP] Failed to remove temp file: {cleanup_err}")
-
-def sync_drive_state():
-    global drive_page_token
-    try:
-        service = get_drive_service()
-        if service:
-            # 1. Inventory existing files
-            existing = list_files_in_folder(service, FOLDER_ID)
-            for f in existing:
-                seen_ids.add(f['id'])
-            print(f"[STARTUP] Drive Sync Complete. Monitoring {len(seen_ids)} files.")
-            
-            # 2. Initialize Change Tracking Token
-            token_response = service.changes().getStartPageToken().execute()
-            drive_page_token = token_response.get('startPageToken')
-            print(f"[STARTUP] Initialized Change Tracking Token: {drive_page_token}")
-            
-    except Exception as e:
-        print(f"[STARTUP] Drive Sync Error: {e}")
 
 # CORS (Allowed origins - adjust as needed)
 origins = ["*"]
@@ -251,15 +94,22 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+# Custom Exception Handler for 422 Errors
+from fastapi.exceptions import RequestValidationError
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    print(f"[VALIDATION ERROR] {exc.errors()}")
+    print(f"[VALIDATION ERROR] Body: {await request.body()}")
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": exc.errors(), "body": str(await request.body())},
+    )
+
 # Config path
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Google Drive Config
-# You can override this by setting GOOGLE_DRIVE_FOLDER_ID in your .env file
-FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "1tUVWuJhjfsSC1BpfgMScflHefr1_vKYy")
 
-SCOPES = ['https://www.googleapis.com/auth/drive']
 
 # --- Supabase Setup ---
 from supabase import create_client, Client
@@ -276,6 +126,36 @@ else:
         print(f"Supabase Init Error: {e}")
 
 # --- Email Notification Setup ---
+import pandas as pd
+from datetime import timezone
+
+# --- Lead Management Helpers ---
+def upload_excel_to_supabase(file_path, filename):
+    """Upload Excel file to Supabase Storage."""
+    if not supabase: return None
+    try:
+        bucket_name = "audio-files" # Using existing bucket for now, or could use 'documents'
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+        
+        # Determine content type
+        ext = filename.split('.')[-1].lower()
+        content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if ext == "csv": content_type = "text/csv"
+        elif ext == "xls": content_type = "application/vnd.ms-excel"
+
+        supabase.storage.from_(bucket_name).upload(
+            path=f"leads/{filename}",
+            file=file_content,
+            file_options={"content-type": content_type, "upsert": "true"}
+        )
+        return supabase.storage.from_(bucket_name).get_public_url(f"leads/{filename}")
+    except Exception as e:
+        print(f"[EXCEL STORAGE] Error: {e}")
+        return None
+
+
+
 EMAIL_RECIPIENT = "basileldo2@gmail.com"
 
 def send_email_notification(filename, sentiment, tags, summary):
@@ -521,33 +401,36 @@ def analyze_transcript_with_groq(text):
         prompt = f"""Analyze the following call transcript and provide a comprehensive, detailed analysis in simple, easy-to-understand words.
 
 1. Sentiment: Classify as exactly one of: "Positive", "Negative", or "Neutral"
-2. Tags: List relevant tags from these options: "Billing", "Support", "Churn Risk", "Sales", "Feedback", "Complaint", "Technical Issue"
-3. Speakers: Identify the identity or role of each speaker label present in the transcript (e.g., "Speaker 0", "Speaker 1"). 
-   - **IMPORTANT**: Extract ONLY the speaker's name if mentioned (e.g., "Diana"). 
-   - NEVER combine name with role (e.g., use "Diana" NOT "Diana, Bank Representative").
-   - If the name is unknown, provide a short, single-word role (e.g., "Agent", "Customer").
+2. Tags: List relevant tags from these options: "Billing", "Support", "Churn Risk", "Sales", "Feedback", "Complaint", "Technical Issue", "Right Party Contact", "Payment Made", "Promise to Pay", "Refusal", "Dispute", "Wrong Number", "Callback Requested"
+3. Speakers: Map the conversation to Speaker 1 and Speaker 2.
+   - **Speaker 1**: Always the Agent / 10xDS representative.
+   - **Speaker 2**: Always the Customer / Debtor.
+   - **IMPORTANT**: If a speaker verifies their name (e.g., "Basil Eldo"), use that name for the respective speaker.
+   - Extract ONLY the name if available (e.g., "Diana"). 
+   - NEVER combine name with role (e.g., use "Diana" NOT "Diana, Agent").
+   - If the specific name is unknown, use "Agent" for Speaker 1 and "Customer" for Speaker 2.
 
 4. Summary: A detailed summary with the following structure:
    
-   - **overview**: Write a comprehensive paragraph (4-6 sentences minimum) that tells the complete story of the call. Include WHO was involved, WHAT was discussed, WHY they called, and WHAT happened. Be specific and detailed.
+   - **overview**: Write a comprehensive paragraph (4-6 sentences minimum) that tells the complete story of the call. Include WHO was involved (specifically check if identity was verified), WHAT was discussed (especially the $200 overdue balance), WHY they called, and WHAT happened with the payment. Be specific and detailed.
    
-   - **key_points**: List 3-5 specific, detailed points that were actually discussed in the call. Each point should be a complete sentence describing what was said or what happened.
+   - **key_points**: List 3-5 specific, detailed points that were actually discussed in the call. Each point should be a complete sentence describing what was said or what happened (e.g., "Customer confirmed identity", "Customer agreed to pay full amount via card"). 
    
-   - **caller_intent**: Write 2-3 detailed sentences explaining EXACTLY what the caller wanted to achieve or accomplish in this call. Be specific about their goals, needs, or requests. 
+   - **caller_intent**: Write 2-3 detailed sentences explaining EXACTLY what the caller wanted to achieve or accomplish in this call. Be specific about their goals, needs, or requests.
      ❌ BAD: "General inquiry"
-     ✅ GOOD: "The caller wanted to verify their account balance and inquire about recent transaction fees that appeared on their statement."
+     ✅ GOOD: "The agent called to collect an overdue balance of $200. The customer wanted to confirm the amount and discuss payment options."
    
-   - **issue_details**: Write 2-3 detailed sentences describing the SPECIFIC problem, topic, or situation that was discussed. Include relevant details like what triggered the call, what the concern was, or what information was being sought.
+   - **issue_details**: Write 2-3 detailed sentences describing the SPECIFIC problem, topic, or situation that was discussed. Include relevant details like the overdue balance, the due date, and any reasons given for non-payment.
      ❌ BAD: "Greeting only"
-     ✅ GOOD: "The customer noticed an unexpected $25 fee on their monthly statement and wanted to understand what it was for and whether it could be waived."
+     ✅ GOOD: "The customer confirmed they had a $200 overdue balance but mentioned they had already made a payment earlier."
    
-   - **resolution**: Write 2-3 detailed sentences explaining EXACTLY what was done, decided, or agreed upon. Include specific actions taken, promises made, or next steps identified.
+   - **resolution**: Write 2-3 detailed sentences explaining EXACTLY what was done, decided, or agreed upon. Include specific actions taken (payment processed, promise to pay date set), promises made, or next steps identified.
      ❌ BAD: "Call completed"
-     ✅ GOOD: "The agent explained that the fee was for international wire transfer and provided documentation. The customer accepted the explanation and requested email confirmation of the fee structure for future reference."
+     ✅ GOOD: "The customer agreed to pay the full $200 immediately via card. The agent processed the payment and provided a confirmation number."
    
    - **action_items**: List specific, actionable next steps with WHO needs to do WHAT. If there are no action items, use an empty array.
    
-   - **tone**: Overall tone (e.g., "friendly and cooperative", "frustrated but professional", "urgent and concerned")
+   - **tone**: Overall tone (e.g., "friendly and cooperative", "frustrated but professional", "urgent and concerned", "empathetic and supportive")
    
    - **meeting_date**: Extract if mentioned in the conversation, else null.
    - **meeting_time**: Extract if mentioned in the conversation, else null.
@@ -567,8 +450,8 @@ Respond ONLY in this exact JSON format:
     "sentiment": "Positive" or "Negative" or "Neutral",
     "tags": ["tag1", "tag2"],
     "speakers": {{
-        "Speaker 0": "Name",
-        "Speaker 1": "Name"
+        "Speaker 1": "Agent Name (Operator)",
+        "Speaker 2": "Customer Name"
     }},
     "summary": {{
         "overview": "Detailed 4-6 sentence paragraph describing the entire call",
@@ -579,7 +462,14 @@ Respond ONLY in this exact JSON format:
         "action_items": ["Specific action 1", "Specific action 2"],
         "tone": "Descriptive tone with adjectives",
         "meeting_date": "Date or null",
-        "meeting_time": "Time or null"
+    "meeting_time": "Time or null",
+        "collection_metrics": {{
+            "payment_outcome": "One of: 'Full Payment', 'Partial Payment', 'Promise to Pay', 'Refusal', 'Dispute', 'No Payment'",
+            "total_debt_amount": 0.0,
+            "amount_collected": 0.0,
+            "currency": "USD",
+            "payment_method": "One of: 'Credit Card', 'Bank Transfer', 'Ach', 'Check', 'Online', 'N/A'"
+        }}
     }}
 }}"""
         response = groq_client.chat.completions.create(
@@ -648,18 +538,16 @@ Respond ONLY in this exact JSON format:
         if speakers:
             summary_data["detected_speakers"] = speakers
 
-        if isinstance(summary_data, dict):
-            summary_json = json.dumps(summary_data)
-        else:
-            summary_json = str(summary_data)
-        
+        if speakers:
+            summary_data["detected_speakers"] = speakers
+
         if sentiment not in ["Positive", "Negative", "Neutral"]:
             sentiment = "Neutral"
         
         print(f"[GROQ] Analysis complete - Sentiment: {sentiment}, Tags: {tags}")
-        print(f"[GROQ] Summary JSON length: {len(summary_json)} characters")
+        print(f"[GROQ] Summary keys: {list(summary_data.keys())}")
         print(f"[GROQ] Speakers detected: {list(speakers.values())}")
-        return sentiment, tags, summary_json, speakers
+        return sentiment, tags, summary_data, speakers
     except Exception as e:
         print(f"[GROQ] Error analyzing transcript: {e}")
         return None
@@ -684,7 +572,19 @@ def analyze_transcript_fallback(text):
     if any(w in text_lower for w in ['cancel', 'cancellation', 'refund', 'leaving', 'quit']): tags.append("Churn Risk")
     
     sentences = text.split('.')
-    summary = ". ".join(sentences[:2]).strip() + "." if len(sentences) > 0 else text
+    overview = ". ".join(sentences[:2]).strip() + "." if len(sentences) > 0 else text
+    
+    summary = {
+        "overview": overview,
+        "key_points": [],
+        "caller_intent": "Not available (fallback analysis)",
+        "issue_details": "Not available (fallback analysis)",
+        "resolution": "Not available (fallback analysis)",
+        "action_items": [],
+        "tone": sentiment,
+        "meeting_date": None,
+        "meeting_time": None
+    }
     return sentiment, tags, summary
 
 def analyze_transcript(text, diarization_data=None):
@@ -824,7 +724,7 @@ def encode_audio_to_base64(file_path):
         print(f"[AUDIO] Error encoding audio: {e}")
         return None
 
-def process_audio_file(file_path, original_filename, drive_file_id=None, language_code=None, speakers_expected=None):
+def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None):
     try:
         transcript, duration_seconds, diarization_data, speaker_count, detected_lang = transcribe_audio(file_path, language_code, speakers_expected)
         sentiment, tags, summary, speakers = analyze_transcript(transcript, diarization_data=diarization_data)
@@ -856,10 +756,23 @@ def process_audio_file(file_path, original_filename, drive_file_id=None, languag
         email_sent = False
         
         audio_url = encode_audio_to_base64(file_path)
-        if not audio_url and drive_file_id:
-            audio_url = f"https://drive.google.com/uc?export=download&id={drive_file_id}"
+        if not audio_url:
+            print(f"[STORAGE] Warning: No audio URL generated for {original_filename}")
+
         
+        # Generate Call ID (TXN-XXXX)
+        call_id_display = None
+        if supabase:
+            try:
+                # Use max(id) to avoid duplicates if rows were deleted
+                max_resp = supabase.table('calls').select("id").order("id", desc=True).limit(1).execute()
+                next_id = (max_resp.data[0]['id'] if max_resp.data else 0) + 1
+                call_id_display = f"TXN-{2801 + next_id}"
+            except:
+                pass
+
         data = {
+            "call_id": call_id_display,
             "filename": original_filename,
             "transcript": transcript,
             "sentiment": sentiment,
@@ -869,7 +782,8 @@ def process_audio_file(file_path, original_filename, drive_file_id=None, languag
             "email_sent": False,
             "audio_url": audio_url,
             "diarization_data": diarization_data,
-            "speaker_count": speaker_count
+            "speaker_count": speaker_count,
+            "medium": medium or "Web"
         }
         
         if supabase:
@@ -907,231 +821,7 @@ def process_audio_file(file_path, original_filename, drive_file_id=None, languag
         print(f"Error processing file: {e}")
         return None
 
-# --- Drive Logic ---
 
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-
-_cached_creds = None
-drive_update_lock = threading.Lock()
-
-def get_drive_service(user_id=None):
-    """Initializes Google Drive service using Service Account credentials from Supabase user_settings."""
-    global _cached_creds
-    SCOPES = ['https://www.googleapis.com/auth/drive']
-    creds = _cached_creds
-    
-    # 1. Try Cached Creds
-    if creds:
-        # print("[DRIVE] Using cached credentials.") # Too verbose
-        pass
-    else:
-        # 2. Try loading from Supabase
-        if supabase:
-            try:
-                # If user_id provided, fetch theirs. Otherwise fetch any (assuming single tenant/admin)
-                query = supabase.table('user_settings').select("settings")
-                if user_id:
-                    query = query.eq('user_id', user_id)
-                else:
-                    query = query.limit(1)
-                    
-                response = query.execute()
-                
-                if response.data and len(response.data) > 0:
-                    # Check each found row (if multiple, though limit(1) prevents that usually)
-                    for row in response.data:
-                        settings = row.get('settings', {})
-                        if not settings: continue
-                        
-                        # Look for service account data in various likely keys or the root
-                        candidates = [
-                            settings.get('service_account_json'),
-                            settings.get('service_account'),
-                            settings.get('google_drive'),
-                            settings # The whole object might be the key
-                        ]
-                        
-                        for candidate in candidates:
-                            if isinstance(candidate, dict) and 'private_key' in candidate and 'client_email' in candidate:
-                                print(f"[DRIVE] Found valid service account in Supabase (User: {row.get('user_id', 'Unknown')})")
-                                creds = Credentials.from_service_account_info(candidate, scopes=SCOPES)
-                                break
-                        if creds: break
-                        
-            except Exception as e:
-                print(f"[DRIVE] Supabase Credential Load Warning: {e}")
-
-        # 3. Fallback to Local File
-        if not creds:
-            SERVICE_ACCOUNT_FILE = 'service-account-key.json' 
-            if os.path.exists(SERVICE_ACCOUNT_FILE):
-                try:
-                    creds = Credentials.from_service_account_file(
-                        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-                    print("[DRIVE] Loaded credentials from local file.")
-                except Exception as e:
-                    print(f"[DRIVE] Local File Validaton Error: {e}")
-            else:
-                # 4. Fallback to Environment Variable Backup
-                backup_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_BACKUP")
-                if backup_json:
-                    try:
-                        import json
-                        creds_info = json.loads(backup_json)
-                        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-                        print("[DRIVE] Loaded credentials from GOOGLE_SERVICE_ACCOUNT_JSON_BACKUP environment variable.")
-                    except Exception as e:
-                        print(f"[DRIVE] Backup Environment Variable Validation Error: {e}")
-
-        if creds:
-            _cached_creds = creds
-
-        else:
-             print(f"[DRIVE] No local service account file found ({SERVICE_ACCOUNT_FILE})")
-
-    if not creds:
-        print("[DRIVE] CRITICAL: No valid Service Account credentials found.")
-        return None
-
-    try:
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        print(f"[DRIVE] Service Build Error: {e}")
-        return None
-
-
-def list_files_in_folder(service, folder_id):
-    query = f"'{folder_id}' in parents and mimeType contains 'audio' and trashed = false"
-    try:
-        results = service.files().list(q=query, fields="files(id, name, createdTime)", orderBy="createdTime desc").execute()
-        return results.get('files', [])
-    except Exception as e:
-        print(f"Drive List Error: {e}")
-        return []
-
-def download_file_from_drive(service, file_id, filename):
-    request = service.files().get_media(fileId=file_id)
-    fh = io.BytesIO()
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    while not done:
-        status, done = downloader.next_chunk()
-    
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
-    with open(file_path, 'wb') as f:
-        f.write(fh.getbuffer())
-    return file_path
-
-def get_drive_file_by_name(service, name, folder_id):
-    """Check if a file with the given name exists in the folder."""
-    query = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
-    try:
-        results = service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-        return files[0]['id'] if files else None
-    except Exception as e:
-        print(f"[DRIVE] Error checking for file existence: {e}")
-        return None
-
-# NOTE: upload_file_to_drive_chunked() has been removed
-# All file uploads now use Supabase Storage via upload_audio_to_supabase()
-# See lines ~290-366 for Supabase Storage implementation
-
-
-def sync_seen_ids_from_db():
-    """Fetch already processed Drive IDs from the database to avoid re-processing."""
-    global seen_ids
-    if not supabase: return
-    try:
-        print("[SYNC] Synchronizing seen_ids from database...")
-        # We look for Drive IDs in audio_url (assuming it contains the ID for non-base64 URLs)
-        
-        # PERFORMANCE FIX 2: Reduced limit to 1000 and select ONLY audio_url
-        response = supabase.table('calls')\
-            .select("audio_url")\
-            .order('created_at', desc=True)\
-            .limit(100)\
-            .execute()
-            
-        for call in response.data:
-            url = call.get('audio_url', '')
-            if url and 'id=' in url:
-                # Extract ID from https://drive.google.com/uc?export=download&id=...
-                drive_id = url.split('id=')[-1].split('&')[0]
-                seen_ids.add(drive_id)
-        print(f"[SYNC] Synchronized {len(seen_ids)} IDs from database (Last 100).")
-    except Exception as e:
-        print(f"[SYNC] Error synchronizing from DB: {e}")
-
-def check_for_updates():
-    """
-    Scan Google Drive folder for new audio files and process them.
-    Called by webhook when Drive files change.
-    """
-    global seen_ids
-    try:
-        print("[DRIVE-CHECK] Scanning for new files...")
-        service = get_drive_service()
-        if not service:
-            print("[DRIVE-CHECK] Drive service not available")
-            return
-        
-        # Get current files in the watched folder
-        files = list_files_in_folder(service, FOLDER_ID)
-        
-        new_files_found = []
-        for file in files:
-            file_id = file['id']
-            filename = file['name']
-            
-            # Skip if we've already processed this file
-            if file_id in seen_ids:
-                continue
-            
-            # Check if file already exists in database
-            if supabase:
-                exists = supabase.table('calls').select('id').eq('filename', filename).execute()
-                if exists.data:
-                    print(f"[DRIVE-CHECK] File {filename} already in database, skipping")
-                    seen_ids.add(file_id)
-                    continue
-            
-            # New file found!
-            new_files_found.append(file)
-            seen_ids.add(file_id)
-        
-        if not new_files_found:
-            print("[DRIVE-CHECK] No new files found")
-            return
-        
-        print(f"[DRIVE-CHECK] Found {len(new_files_found)} new file(s) to process")
-        
-        # Process each new file
-        for file in new_files_found:
-            try:
-                file_id = file['id']
-                filename = file['name']
-                
-                print(f"[DRIVE-CHECK] Processing new file: {filename}")
-                
-                # Download file
-                file_path = download_file_from_drive(service, file_id, filename)
-                
-                # Process the audio file
-                process_audio_file(file_path, filename, drive_file_id=file_id)
-                
-                print(f"[DRIVE-CHECK] Successfully processed: {filename}")
-                
-            except Exception as file_error:
-                print(f"[DRIVE-CHECK] Error processing file {filename}: {file_error}")
-                # Continue with next file even if this one fails
-                continue
-                
-    except Exception as e:
-        print(f"[DRIVE-CHECK] Error scanning for updates: {e}")
-        import traceback
-        traceback.print_exc()
 
 # --- Vapi Webhooks ---
 
@@ -1308,8 +998,21 @@ async def handle_end_of_call(message: dict, call_data: dict, background_tasks: B
         safe_name = secure_filename(filename)
         temp_path = os.path.join(UPLOAD_FOLDER, safe_name)
         
-        print(f"[VAPI-WEBHOOK] Triggering background processing for {safe_name}")
-        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager)
+        # Determine Medium from Vapi call type
+        # Vapi sends: 'webCall' for browser/widget calls, 'inboundPhoneCall'/'outboundPhoneCall' for phone
+        call_type = call_data.get('type', '')
+        print(f"[VAPI-WEBHOOK] Raw call type: '{call_type}'")
+        
+        # Detect phone calls explicitly; everything else (web widget, unknown) defaults to 'Web'
+        phone_types = ['inboundPhoneCall', 'outboundPhoneCall', 'inbound-phone-call', 'outbound-phone-call']
+        if call_type in phone_types or ('phone' in call_type.lower()):
+            medium = 'Phone'
+        else:
+            # webCall, web, web_call, or empty/unknown → Web (browser widget)
+            medium = 'Web'
+        
+        print(f"[VAPI-WEBHOOK] Detected medium: {medium} (call_type='{call_type}')")
+        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, medium)
     else:
         print("[VAPI-WEBHOOK] No recording URL found (or no background tasks), skipping file processing.")
 
@@ -1380,104 +1083,7 @@ async def get_transcripts(call_id: str):
 
 # --- Webhook & Background Tasks ---
 
-seen_ids = set()
 
-def check_for_updates():
-    global drive_page_token
-    
-    # Non-blocking lock to prevent multiple concurrent checks
-    if not drive_update_lock.acquire(blocking=False):
-        # Silently skip if already running to prevent log spam
-        return
-
-    try:
-        print(f"[CHANGES] check_for_updates called. Current Token: {str(drive_page_token)[:30]}...")
-        
-        service = get_drive_service()
-        if not service: 
-            print("[CHANGES] No Service Available")
-            return
-
-        # Safety: If token lost/not set, re-init
-        if not drive_page_token:
-            print("[CHANGES] Token missing, fetching new start token.")
-            try:
-                response = service.changes().getStartPageToken().execute()
-                drive_page_token = response.get('startPageToken')
-                print(f"[CHANGES] Fetched new token: {drive_page_token}")
-            except Exception as e:
-                print(f"Error getting token: {e}")
-                return
-        while drive_page_token:
-            print(f"[CHANGES] Requesting changes from Google (Token: ...{str(drive_page_token)[-10:]})")
-            response = service.changes().list(
-                pageToken=drive_page_token,
-                spaces='drive',
-                includeCorpusRemovals=True,
-                fields='nextPageToken, newStartPageToken, changes(fileId, removed, file(id, name, mimeType, parents))'
-            ).execute()
-            
-            changes = response.get('changes', [])
-            print(f"[CHANGES] Google returned {len(changes)} item(s).")
-            
-            for change in changes:
-                f_id = change.get('fileId')
-                if change.get('removed'): 
-                    print(f"[CHANGES] Item {f_id} was removed. Skipping.")
-                    continue
-                
-                f = change.get('file')
-                if not f: 
-                    print(f"[CHANGES] Item {f_id} has no file dict. Skipping.")
-                    continue
-                
-                f_name = f.get('name', 'Unknown')
-                print(f"[CHANGES] Analyzing file: {f_name} ({f_id})")
-
-                # 1. Filter by Parent Folder
-                parents = f.get('parents', [])
-                if FOLDER_ID not in parents: 
-                    print(f"[CHANGES] Skip {f_name}: Parent {parents} != {FOLDER_ID}")
-                    continue
-                
-                # 2. Filter by Type (Audio)
-                mime = f.get('mimeType', '')
-                if 'audio' not in mime:
-                    print(f"[CHANGES] Skip {f_name}: Mime {mime} not audio.")
-                    continue
-
-                if f_id in seen_ids: 
-                    print(f"[CHANGES] Skip {f_name}: Already processed.")
-                    continue
-                
-                print(f"*** NEW CHANGE DETECTED: {f_name} ***")
-                seen_ids.add(f_id)
-                
-                # Process - Schedule on main loop
-                safe_name = secure_filename(f_name)
-                file_path = download_file_from_drive(service, f_id, safe_name)
-                
-                if file_path and app_loop:
-                    print(f"[CHANGES] Scheduling async processing for {f_name}")
-                    asyncio.run_coroutine_threadsafe(
-                        process_drive_file(file_path, f_name, f_id, notification_manager), 
-                        app_loop
-                    )
-                elif file_path:
-                     # Fallback if no loop (shouldn't happen)
-                     process_audio_file(file_path, f_name, drive_file_id=f_id)
-
-            if 'newStartPageToken' in response:
-                drive_page_token = response.get('newStartPageToken')
-                print(f"[CHANGES] Sync complete. Token Updated.")
-                break 
-            
-            drive_page_token = response.get('nextPageToken')
-
-    except Exception as e:
-        print(f"[CHANGES] Major Error in processing loop: {e}")
-    finally:
-        drive_update_lock.release()
 
 # --- Dependencies ---
 
@@ -1496,6 +1102,119 @@ async def login_required(request: Request):
     return user_id
 
 # --- Routes ---
+
+# --- Lead Routes ---
+
+@app.post("/api/pending/upload")
+async def upload_pending_leads(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    user_id: str = Depends(login_required)
+):
+    if not supabase:
+        return JSONResponse(status_code=500, content={"error": "Database not connected"})
+    
+    filename = secure_filename(file.filename)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_filename = f"{timestamp}_{filename}"
+    temp_path = os.path.join(UPLOAD_FOLDER, unique_filename)
+    
+    # Save temp file
+    async with aiofiles.open(temp_path, 'wb') as out_file:
+        content = await file.read()
+        await out_file.write(content)
+        
+    try:
+        # Parse Excel/CSV
+        if unique_filename.endswith('.csv'):
+            df = pd.read_csv(temp_path)
+        else:
+            df = pd.read_excel(temp_path)
+            
+        # Standardize column names (lowercase, no spaces)
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # Convert to list of dicts via JSON string to safely handle NaN/Infinity values
+        # pandas.to_json handles NaN -> null correctly for PostgreSQL JSONB
+        records_json = df.to_json(orient='records', date_format='iso')
+        records = json.loads(records_json)
+        
+        if not records:
+            return JSONResponse(status_code=400, content={"error": "Excel sheet is empty"})
+            
+        # Store in Supabase
+        # We'll try to insert batches to avoid timeout
+        batch_size = 50
+        for i in range(0, len(records), batch_size):
+            batch = records[i:i + batch_size]
+            db_records = []
+            # Calculate call scheduled time: current time + 2 hours
+            call_scheduled_time = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+            
+            for row in batch:
+                db_records.append({
+                    "user_id": user_id,
+                    "filename": filename,
+                    "lead_data": row,
+                    "status": "pending",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "call_scheduled_on": call_scheduled_time
+                })
+            
+            # Using table 'pending_leads'. Note: User must have this table created.
+            supabase.table('pending_leads').insert(db_records).execute()
+        
+        # Upload original file to storage in background
+        background_tasks.add_task(upload_excel_to_supabase, temp_path, unique_filename)
+        
+        return {
+            "status": "success", 
+            "message": f"Successfully imported {len(records)} leads from {filename}",
+            "count": len(records)
+        }
+        
+    except Exception as e:
+        print(f"[EXCEL UPLOAD] Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        # We keep the file until background task finishes, or delete after 
+        pass
+
+@app.get("/api/pending/leads")
+async def get_pending_leads(user_id: str = Depends(login_required)):
+    if not supabase:
+        return JSONResponse(status_code=500, content={"error": "Database error"})
+    
+    try:
+        response = supabase.table('pending_leads')\
+            .select("*")\
+            .order('id', desc=False)\
+            .execute()
+        return response.data
+    except Exception as e:
+        print(f"[GET LEADS] Error: {e}")
+        return []
+
+@app.delete("/api/pending/leads")
+async def clear_pending_leads(user_id: str = Depends(login_required)):
+    if not supabase:
+        return JSONResponse(status_code=500, content={"error": "Database error"})
+    
+    try:
+        # For simplicity, we clear all for now. In multi-user we would filter by user_id
+        supabase.table('pending_leads').delete().neq('id', 0).execute()
+        return {"status": "success", "message": "Cleared lead queue"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.delete("/api/pending/leads/{lead_id}")
+async def delete_pending_lead(lead_id: int, user_id: str = Depends(login_required)):
+    if not supabase: return JSONResponse(status_code=500, content={"error": "Database error"})
+    try:
+        supabase.table('pending_leads').delete().eq('id', lead_id).execute()
+        return {"status": "success"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, user_id: str = Depends(login_required)):
@@ -1534,6 +1253,39 @@ async def api_login(request: Request, login_data: LoginRequest):
     request.session["user_id"] = login_data.user_id
     request.session["email"] = login_data.email
     return {"success": True, "message": "Session created"}
+
+@app.get("/api/admin/setup")
+async def setup_admin():
+    """Diagnostic route to create the default admin user if it's missing."""
+    if not supabase: 
+        return JSONResponse(status_code=500, content={"error": "Supabase client not initialized"})
+    
+    try:
+        admin_email = "admin@10xds.com"
+        default_password = "admin123" # Temporary setup password
+        
+        # Use service role to create user via admin API
+        # This only works if SUPABASE_KEY is the service_role key
+        response = supabase.auth.admin.create_user({
+            "email": admin_email,
+            "password": default_password,
+            "email_confirm": True
+        })
+        
+        return {
+            "success": True, 
+            "message": f"Admin user '{admin_email}' created successfully with password '{default_password}'. Please log in and change your password.",
+            "user_id": response.user.id
+        }
+    except Exception as e:
+        error_str = str(e)
+        if "already exists" in error_str.lower() or "User already exists" in error_str:
+            return {
+                "success": False, 
+                "message": "Admin user 'admin@10xds.com' already exists. If you forgot the password, please reset it in the Supabase Dashboard."
+            }
+        print(f"[SETUP] Admin setup error: {e}")
+        return JSONResponse(status_code=500, content={"error": f"Failed to create admin user: {error_str}"})
 
 @app.post("/api/auth/logout")
 async def api_logout(request: Request):
@@ -1609,7 +1361,7 @@ async def get_call_details(call_id: int, user_id: str = Depends(login_required))
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/api/call-stats")
-async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
+async def get_call_stats_endpoint(days: int = 0, user_id: str = Depends(get_current_user)):
     if not supabase: return {"stats": {}}
     
     try:
@@ -1620,53 +1372,120 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
         use_db_function = False
         stats_data = {}
         
+        # try:
+        #     stats_result = await asyncio.to_thread(
+        #         lambda: supabase.rpc('get_call_stats').execute()
+        #     )
+        #     print(f"[API STATS] RPC result type: {type(stats_result.data)}")
+        #     if stats_result.data:
+        #         if isinstance(stats_result.data, list) and len(stats_result.data) > 0:
+        #             stats_data = stats_result.data[0]
+        #         elif isinstance(stats_result.data, dict):
+        #             stats_data = stats_result.data
+                
+        #         if isinstance(stats_data, dict):
+        #             print(f"[API STATS] RPC stats received keys: {list(stats_data.keys())}")
+        #             use_db_function = True
+        #         else:
+        #             print(f"[API STATS] RPC returned data but it wasn't a dict: {type(stats_data)}")
+        # except Exception as e:
+        #     print(f"[API STATS] Database function failed: {e}, using fallback")
+        #     use_db_function = False
+
+        # Get total count independently to ensure accuracy
+        total_count = 0
         try:
-            stats_result = await asyncio.to_thread(
-                lambda: supabase.rpc('get_call_stats').execute()
-            )
-            if stats_result.data:
-                stats_data = stats_result.data
-                use_db_function = True
+            count_resp = await asyncio.to_thread(lambda: supabase.table('calls').select("*", count="exact").limit(1).execute())
+            total_count = count_resp.count if hasattr(count_resp, 'count') else 0
+            print(f"[API STATS] Total count from DB: {total_count}")
         except Exception as e:
-            print(f"[API STATS] Database function failed: {e}, using fallback")
-            use_db_function = False
+            print(f"[API STATS] Count query failed: {e}")
 
         if use_db_function:
             # Stats already computed by database
             stats = {
+                "total": total_count or stats_data.get('total_calls', 0) or stats_data.get('count', 0),
                 "sentiment": {
                     "positive": stats_data.get('positive', 0),
                     "negative": stats_data.get('negative', 0),
                     "neutral": stats_data.get('neutral', 0)
                 },
-                "avg_duration": round(stats_data.get('avg_duration') or 0, 2),
+                "avg_duration": round(float(stats_data.get('avg_duration') or 0), 2),
                 "tag_counts": {
-                    "Support": stats_data.get('support', 0),
-                    "Billing": stats_data.get('billing', 0),
-                    "Technical": stats_data.get('technical', 0)
-                }
+                    "PTP": stats_data.get('ptp', 0) or stats_data.get('payment_made', 0) or stats_data.get('billing', 0),
+                    "Refusal": stats_data.get('refusal', 0),
+                    "Dispute": stats_data.get('dispute', 0),
+                    "Wrong Number": stats_data.get('wrong_number', 0),
+                    "Callback": stats_data.get('callback', 0) or stats_data.get('callback_requested', 0),
+                    "RPC": stats_data.get('rpc', 0) or stats_data.get('right_party_contact', 0)
+                },
+                "resolved_cases": stats_data.get('payment_made', 0) or stats_data.get('paid_full', 0) or 0
             }
         else:
+            print("[API STATS] Running fallback manual calculation...")
             # Fallback: Drastically reduce the limit
             stats_query = supabase.table('calls')\
-                .select("sentiment, duration, tags")\
-                .order('id', desc=True)\
-                .limit(50)  # Reduced to 50 rows only
+                .select("sentiment, duration, tags, summary, created_at")\
+                .order('id', desc=True)
+            
+            if days > 0:
+                start_date = (datetime.now() - timedelta(days=days)).isoformat()
+                print(f"[API STATS] Filtering calls from: {start_date}")
+                stats_query = stats_query.gte('created_at', start_date)
+            
+            stats_query = stats_query.limit(2000)
             
             stats_response = await asyncio.to_thread(run_query, stats_query)
             all_data = stats_response.data or []
+            print(f"[API STATS] Fallback data rows: {len(all_data)}")
             
-            # Calculate stats from limited dataset
+            # Calculate stats from dataset
             stats = {
+                "total": total_count,
+                "analyzed_total": len(all_data),
                 "sentiment": {"positive": 0, "negative": 0, "neutral": 0},
                 "avg_duration": 0,
-                "tag_counts": {"Support": 0, "Billing": 0, "Technical": 0}
+                "tag_counts": {
+                    "PTP": 0,
+                    "Refusal": 0,
+                    "Dispute": 0,
+                    "Wrong Number": 0,
+                    "Callback": 0,
+                    "RPC": 0
+                },
+                "resolved_cases": 0,
+                "performance_trend": [],
+                "weekly_activity": [],
+                "funnel": {
+                    "calls_made": 0,
+                    "connected": 0,
+                    "ptp": 0,
+                    "payment": 0
+                }
             }
+            
+            monthly_trend = {}
+            weekly_counts = {
+                "Mon": {"calls": 0, "payments": 0},
+                "Tue": {"calls": 0, "payments": 0},
+                "Wed": {"calls": 0, "payments": 0},
+                "Thu": {"calls": 0, "payments": 0},
+                "Fri": {"calls": 0, "payments": 0},
+                "Sat": {"calls": 0, "payments": 0},
+                "Sun": {"calls": 0, "payments": 0}
+            }
+            # Day mapping for datetime.weekday() (0=Monday, 6=Sunday)
+            day_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+            
+            # List of month names in order for sorting
+            month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
             
             total_duration = 0
             valid_duration_count = 0
             
             for c in all_data:
+                if not isinstance(c, dict): continue
+                
                 sent = (c.get('sentiment') or 'neutral').lower()
                 if sent == 'positive': 
                     stats["sentiment"]["positive"] += 1
@@ -1677,32 +1496,183 @@ async def get_call_stats_endpoint(user_id: str = Depends(get_current_user)):
 
                 dur = c.get('duration')
                 if dur is not None:
-                    total_duration += dur
-                    valid_duration_count += 1
+                    try:
+                        total_duration += float(dur)
+                        valid_duration_count += 1
+                    except: pass
 
                 tags = c.get('tags', [])
-                if tags:
-                    tags_lower = {tag.lower() for tag in tags}
-                    if 'support' in tags_lower or 'help' in tags_lower:
-                        stats["tag_counts"]["Support"] += 1
-                    if any(t in tags_lower for t in ['billing', 'payment', 'invoice']):
-                        stats["tag_counts"]["Billing"] += 1
-                    if any(t in tags_lower for t in ['technical', 'technical issue', 'error', 'bug']):
-                        stats["tag_counts"]["Technical"] += 1
+                tags_lower = []
+                if isinstance(tags, list):
+                    tags_lower = [str(tag).lower() for tag in tags]
+                    
+                    # Flexible matching (substrings) - alignment with frontend logic
+                    # Expanded PTP synonyms
+                    if any(x in t for x in ['promise', 'ptp', 'payment made', 'commitment', 'will pay', 'agreed', 'partial payment', 'full payment', 'commitment to pay'] for t in tags_lower):
+                        stats["tag_counts"]["PTP"] += 1
+                    
+                    if any(x in t for x in ['refusa', 'not interested', 'hang up', 'not paying', 'rejected'] for t in tags_lower):
+                        stats["tag_counts"]["Refusal"] += 1
+                        
+                    if any(x in t for x in ['dispute', 'complaint', 'legal', 'lawyer', 'incorrect'] for t in tags_lower):
+                        stats["tag_counts"]["Dispute"] += 1
+                        
+                    if any('wrong number' in t or 'not the person' in t for t in tags_lower):
+                        stats["tag_counts"]["Wrong Number"] += 1
+                        
+                    if any('callback' in t or 'call me back' in t or 'busy' in t for t in tags_lower):
+                        stats["tag_counts"]["Callback"] += 1
+                        
+                    # Expanded RPC synonyms
+                    if any(x in t for x in ['right party', 'verified', 'rpc', 'spoke to', 'contacted', 'identity confirmed', 'person reached'] for t in tags_lower):
+                        stats["tag_counts"]["RPC"] += 1
+
+                # Parse Summary for Metrics
+                summary_raw = c.get('summary')
+                summary = {}
+                if isinstance(summary_raw, dict):
+                    summary = summary_raw
+                elif isinstance(summary_raw, str):
+                    try: summary = json.loads(summary_raw)
+                    except: pass
+                
+                payment_outcome = str(summary.get('collection_metrics', {}).get('payment_outcome', '')).lower()
+
+                # Calculate Resolved Cases: Check tags AND summary metrics
+                is_resolved = False
+                if any('paid full' in t or 'paid in full' in t or 'fully paid' in t for t in tags_lower):
+                    is_resolved = True
+                elif 'full' in payment_outcome: 
+                    # Align with frontend logic: includes('full') -> 'Paid Full'
+                    is_resolved = True
+
+                if is_resolved:
+                    stats["resolved_cases"] += 1
+                
+                # Trend logic: Group by Month
+                raw_date = c.get('created_at')
+                if raw_date:
+                    try:
+                        dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+                        month_key = dt.strftime('%b')
+                        
+                        if month_key not in monthly_trend:
+                            monthly_trend[month_key] = {"total_due": 0.0, "collected": 0.0, "balance": 0.0}
+                        
+                        if isinstance(summary, dict) and 'collection_metrics' in summary:
+                            metrics = summary['collection_metrics']
+                            total = float(metrics.get('total_debt_amount') or metrics.get('total_due') or 0.0)
+                            collected = float(metrics.get('amount_collected') or 0.0)
+                            
+                            monthly_trend[month_key]["total_due"] += total
+                            monthly_trend[month_key]["collected"] += collected
+                            monthly_trend[month_key]["balance"] += (total - collected)
+                        elif isinstance(summary, dict) and 'summary' in summary and isinstance(summary['summary'], dict) and 'collection_metrics' in summary['summary']:
+                            metrics = summary['summary']['collection_metrics']
+                            total = float(metrics.get('total_debt_amount') or metrics.get('total_due') or 0.0)
+                            collected = float(metrics.get('amount_collected') or 0.0)
+                            
+                            monthly_trend[month_key]["total_due"] += total
+                            monthly_trend[month_key]["collected"] += collected
+                            monthly_trend[month_key]["balance"] += (total - collected)
+                            
+                    except Exception as trend_err:
+                        pass # Silently skip malformed dates in trend
+
+                # Weekly Activity Logic
+                if raw_date:
+                    try:
+                        dt = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+                        day_idx = dt.weekday()
+                        day_key = day_map[day_idx]
+                        
+                        weekly_counts[day_key]["calls"] += 1
+                        
+                        # Check for payment success (PTP tag or collected amount > 0)
+                        is_payment = False
+                        if any(x in t for x in ['promise', 'ptp', 'payment', 'paid'] for t in tags_lower):
+                            is_payment = True
+                        
+                        if not is_payment and isinstance(summary, dict):
+                             metrics = summary.get('collection_metrics') or (summary.get('summary', {}).get('collection_metrics') if isinstance(summary.get('summary'), dict) else None)
+                             if metrics and float(metrics.get('amount_collected') or 0.0) > 0:
+                                 is_payment = True
+
+                        if is_payment:
+                            weekly_counts[day_key]["payments"] += 1
+                        
+                        # Funnel Logic
+                        stats["funnel"]["calls_made"] += 1
+                        if c.get('duration') and float(c.get('duration')) > 5:
+                            stats["funnel"]["connected"] += 1
+                        if any(x in t for x in ['promise', 'ptp'] for t in tags_lower):
+                             stats["funnel"]["ptp"] += 1
+                        if is_payment:
+                             stats["funnel"]["payment"] += 1
+                             
+                    except: pass
+
+            # Format trend data for frontend
+            sorted_months = sorted(monthly_trend.keys(), key=lambda m: month_names.index(m) if m in month_names else 99)
+            for m in sorted_months:
+                stats["performance_trend"].append({
+                    "month": m,
+                    "total_due": round(monthly_trend[m]["total_due"], 2),
+                    "collected": round(monthly_trend[m]["collected"], 2),
+                    "balance": round(monthly_trend[m]["balance"], 2)
+                })
+            
+            # Format Weekly Activity
+            for day in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]:
+                stats["weekly_activity"].append({
+                    "day": day,
+                    "calls": weekly_counts[day]["calls"],
+                    "payments": weekly_counts[day]["payments"]
+                })
+
+            # Mock data only if truly empty
+            if not stats["performance_trend"]:
+                stats["performance_trend"] = [
+                    {"month": "Jan", "total_due": 240, "collected": 65, "balance": 175},
+                    {"month": "Feb", "total_due": 235, "collected": 70, "balance": 165},
+                    {"month": "Mar", "total_due": 240, "collected": 68, "balance": 172},
+                    {"month": "Apr", "total_due": 230, "collected": 75, "balance": 155},
+                    {"month": "May", "total_due": 235, "collected": 72, "balance": 163},
+                    {"month": "Jun", "total_due": 230, "collected": 78, "balance": 152}
+                ]
+            
+            if all(d["calls"] == 0 for d in stats["weekly_activity"]):
+                 stats["weekly_activity"] = [
+                    {"day": "Mon", "calls": 420, "payments": 180},
+                    {"day": "Tue", "calls": 560, "payments": 220},
+                    {"day": "Wed", "calls": 610, "payments": 240},
+                    {"day": "Thu", "calls": 540, "payments": 190},
+                    {"day": "Fri", "calls": 480, "payments": 175},
+                    {"day": "Sat", "calls": 210, "payments": 90},
+                    {"day": "Sun", "calls": 150, "payments": 65}
+                ]
             
             stats["avg_duration"] = round(total_duration / valid_duration_count, 2) if valid_duration_count > 0 else 0
 
-        t_end = time.time()
-        print(f"[API STATS] Completed in {t_end - t_start:.4f}s")
         return {"stats": stats}
 
     except Exception as e:
         print(f"[API STATS] Error: {e}")
+        import traceback
+        traceback.print_exc()
         # Return empty stats on error rather than 500 to prevent UI crash
         return {"stats": {
+            "total": 0,
             "sentiment": {"positive": 0, "negative": 0, "neutral": 0},
             "avg_duration": 0,
-            "tag_counts": {"Support": 0, "Billing": 0, "Technical": 0}
+            "tag_counts": {
+                "PTP": 0,
+                "Refusal": 0,
+                "Dispute": 0,
+                "Wrong Number": 0,
+                "Callback": 0,
+                "RPC": 0
+            }
         }}
 
 @app.get("/api/calls")
@@ -1714,14 +1684,25 @@ async def get_calls(user_id: str = Depends(get_current_user), offset: int = 0, l
         # Main query (Optimized: Exclude heavy transcript/diarization fields)
         # Use ID for sorting as it's an indexed primary key (faster than created_at)
         main_query = supabase.table('calls')\
-            .select("id, filename, sentiment, tags, summary, duration, created_at, speaker_count, email_sent", count="exact")\
+            .select("id, call_id, filename, sentiment, tags, summary, duration, created_at, speaker_count, email_sent, medium", count="exact")\
             .order('id', desc=True)\
             .range(offset, offset + limit - 1)
 
         # Execute main query
         response = await asyncio.to_thread(run_query, main_query)
         
-        print(f"[API] get_calls count: {response.count} (type: {type(response.count)})")
+        # Ensure 'medium' field for old records that have NULL medium in DB
+        if response.data:
+            for call in response.data:
+                if not call.get('medium'):  # Only patch NULL/empty values
+                    filename = call.get('filename', '').lower()
+                    # Only mark as Phone if filename explicitly signals a phone call
+                    if 'phone' in filename:
+                        call['medium'] = 'Phone'
+                    else:
+                        # vapi_call_ files from web widget, manual uploads, etc. → Web
+                        call['medium'] = 'Web'
+                    
         data_len = len(response.data) if response.data else 0
         print(f"[API] get_calls returned {data_len} rows.")
 
@@ -1819,7 +1800,19 @@ async def upload_audio(
             
             email_sent = send_email_notification(safe_name, sentiment, tags, summary)
             
+            # Generate Call ID
+            call_id_display = None
+            if supabase:
+                try:
+                    # Use max(id) to avoid duplicates if rows were deleted
+                    max_resp = supabase.table('calls').select("id").order("id", desc=True).limit(1).execute()
+                    next_id = (max_resp.data[0]['id'] if max_resp.data else 0) + 1
+                    call_id_display = f"TXN-{2801 + next_id}"
+                except:
+                    pass
+
             data = {
+                "call_id": call_id_display,
                 "filename": safe_name,
                 "transcript": transcript,
                 "sentiment": sentiment,
@@ -1829,7 +1822,8 @@ async def upload_audio(
                 "audio_url": audio_url,
                 "duration": int(duration_seconds),
                 "diarization_data": diarization_data,
-                "speaker_count": speaker_count
+                "speaker_count": speaker_count,
+                "medium": "Web"
             }
             
             if supabase:
@@ -2086,122 +2080,7 @@ async def reanalyze_call(req: Dict[str, Any]):
 
 
 
-import uuid
 
-# Track current webhook channel to manage renewals
-current_webhook_channel_id = None
-current_webhook_resource_id = None
-
-def register_drive_webhook():
-    """Register the Drive webhook on startup and handle renewal."""
-    global current_webhook_channel_id, current_webhook_resource_id
-    
-    webhook_url = os.environ.get("RENDER_EXTERNAL_URL")
-    if not webhook_url:
-        print("[WEBHOOK] Warning: RENDER_EXTERNAL_URL not set. Skipping webhook registration.")
-        return
-
-    # Ensure URL is clean and points to the correct endpoint
-    webhook_url = webhook_url.strip().rstrip('/')
-    
-    # Check if the URL already includes the endpoint path to avoid double-appending
-    if not webhook_url.endswith("/webhook/drive"):
-         webhook_url = f"{webhook_url}/webhook/drive"
-         
-    service = get_drive_service()
-    if not service:
-        print("[WEBHOOK] Drive service not available for registration.")
-        return
-        
-    try:
-        # 1. STOP old channel if it exists (Cleanup)
-        if current_webhook_channel_id and current_webhook_resource_id:
-            try:
-                print(f"[WEBHOOK] Stopping old channel: {current_webhook_channel_id}...")
-                service.channels().stop(body={
-                    "id": current_webhook_channel_id,
-                    "resourceId": current_webhook_resource_id
-                }).execute()
-                print("[WEBHOOK] Old channel stopped successfully.")
-            except Exception as stop_err:
-                print(f"[WEBHOOK] Warning: Could not stop old channel: {stop_err}")
-
-        # 2. Register NEW channel
-        # Create a unique channel ID for this session/deployment
-        channel_id = str(uuid.uuid4())
-        
-        # Expiration: Default is usually 7 days (604800 seconds).
-        # We set it slightly less or let default apply, but we will renew before it happens.
-        body = {
-            "id": channel_id,
-            "type": "web_hook",
-            "address": webhook_url,
-            # "expiration": ... (optional, let's use default/max)
-        }
-        
-        print(f"[WEBHOOK] Registering webhook at: {webhook_url}")
-        response = service.files().watch(fileId=FOLDER_ID, body=body).execute()
-        
-        # 3. Update Global State
-        current_webhook_channel_id = response.get('id')
-        current_webhook_resource_id = response.get('resourceId')
-        expiration = response.get('expiration', 'Unknown')
-        
-        print(f"[WEBHOOK] SUCCESS: Channel Registered.")
-        print(f"   - Channel ID: {current_webhook_channel_id}")
-        print(f"   - Resource ID: {current_webhook_resource_id}")
-        print(f"   - Expiration: {expiration}")
-        
-    except Exception as e:
-        print(f"[WEBHOOK] Registration Error: {e}")
-
-async def webhook_renewal_loop():
-    """Background task to renew the webhook every 6 days (before 7-day expiry)."""
-    print("[WEBHOOK LOOP] Starting auto-renewal service...")
-    while True:
-        try:
-            print("[WEBHOOK LOOP] Performing registration/renewal...")
-            await run_in_threadpool(register_drive_webhook)
-        except Exception as e:
-            print(f"[WEBHOOK LOOP] Error during renewal: {e}")
-        
-        # Wait for 6 days (in seconds)
-        # 6 days * 24 hours * 60 mins * 60 secs = 518400 seconds
-        renewal_interval = 6 * 24 * 60 * 60 
-        print(f"[WEBHOOK LOOP] Sleeping for {renewal_interval} seconds (6 days)...")
-        await asyncio.sleep(renewal_interval)
-
-# --- Google Drive Webhook ---
-
-@app.post("/webhook/drive")
-async def drive_webhook(request: Request, background_tasks: BackgroundTasks):
-    """
-    Handle Google Drive Push Notifications.
-    """
-    try:
-        # Log headers for debugging
-        print("\n[DRIVE-WEBHOOK] Received Notification")
-        headers = request.headers
-        channel_id = headers.get('x-goog-channel-id')
-        resource_state = headers.get('x-goog-resource-state')
-        resource_id = headers.get('x-goog-resource-id')
-        
-        print(f"Channel ID: {channel_id}")
-        print(f"Resource State: {resource_state}")
-        print(f"Resource ID: {resource_id}")
-        
-        # 'sync' is sent when the webhook is first registered to confirm connectivity
-        # 'add' or 'update' means files changed
-        if resource_state in ['sync', 'add', 'update', 'change']:
-            print("[DRIVE-WEBHOOK] Triggering file scan...")
-            # Reuse the existing check logic, running in background
-            background_tasks.add_task(run_in_threadpool, check_for_updates)
-            
-        print(f"[DRIVE-WEBHOOK] Responding 200 OK to Channel {channel_id}")
-        return Response(status_code=200)
-    except Exception as e:
-        print(f"[DRIVE-WEBHOOK] Error: {e}")
-        return Response(status_code=500)
 
 
 # --- Notification System (Global SSE) ---
@@ -2241,7 +2120,7 @@ async def notifications_stream(request: Request):
 
 # --- Vapi Webhook Handling ---
 
-async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager):
+async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager, medium: str = None):
     """
     Background task to process Vapi call and broadcast updates.
     """
@@ -2316,8 +2195,8 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         print("[VAPI] Supabase upload confirmed. Starting Analysis Pipeline...")
         await notification_manager.broadcast(create_event("analyze", "Analyzing call sentiment..."))
         
-        # process_audio_file is synchronous - pass None for drive_file_id since we're using Supabase
-        await run_in_threadpool(process_audio_file, temp_path, filename, drive_file_id=None)
+        # process_audio_file is synchronous
+        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium)
         
         print("[VAPI] Processing Complete!")
         await notification_manager.broadcast(create_event("done", "Analysis complete!", "success"))
@@ -2352,6 +2231,11 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
             check_obj = payload.get('message', payload)
             message_type = check_obj.get('type')
             call_id = check_obj.get('call', {}).get('id') or payload.get('call', {}).get('id')
+            
+            # Debug Log
+            if message_type not in ['speech-update', 'model-output']:  # Filter noise
+                print(f"[VAPI DEBUG] Type: {message_type}, Call ID: {call_id}")
+
         
         # --- 1. Handle Status Updates (Live Call Tracking) ---
         if message_type == 'status-update' or message_type == 'call-status-update':
@@ -2363,17 +2247,41 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
                     "status": status,
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 }
-                # Additional fields on start
-                if status == 'started':
-                    data['started_at'] = datetime.now(timezone.utc).isoformat()
-                elif status == 'ended':
-                    data['ended_at'] = datetime.now(timezone.utc).isoformat()
-                    # Try to get cost/summary if available
-                    if 'cost' in check_obj: data['cost'] = check_obj['cost']
-                    if 'summary' in check_obj: data['summary'] = check_obj['summary']
+                
+                # NOTE: Schema provided does not have started_at, ended_at, cost, summary.
+                # Commenting out to prevent 'column does not exist' errors.
+                # if status == 'started':
+                #     data['started_at'] = datetime.now(timezone.utc).isoformat()
+                # elif status == 'ended':
+                #     data['ended_at'] = datetime.now(timezone.utc).isoformat()
+                #     if 'cost' in check_obj: data['cost'] = check_obj['cost']
+                #     if 'summary' in check_obj: data['summary'] = check_obj['summary']
+
+                # Extract customer phone if available (Schema supports this)
+                customer_phone = check_obj.get('call', {}).get('customer', {}).get('number')
+                if customer_phone:
+                    data['customer_phone'] = customer_phone
 
                 try:
-                    await asyncio.to_thread(lambda: supabase.table('vapi_calls').upsert(data).execute())
+                    # Use on_conflict to ensure upsert works with unique call_id constraint
+                    await asyncio.to_thread(lambda: supabase.table('vapi_calls').upsert(data, on_conflict='call_id').execute())
+                    
+                    # Broadcast notification for started/in-progress calls
+                    if status in ['started', 'in-progress']:
+                        print(f"[VAPI LIVE] Broadcasting call started event for {call_id}")
+                        await notification_manager.broadcast(json.dumps({
+                            "type": "vapi_call_started",
+                            "call_id": call_id,
+                            "status": status,
+                            "message": f"A new live call has started (ID: {call_id[:8]}...)"
+                        }))
+                    elif status in ['ended', 'failed', 'completed']:
+                        print(f"[VAPI LIVE] Broadcasting call ended event for {call_id}")
+                        await notification_manager.broadcast(json.dumps({
+                            "type": "vapi_call_ended",
+                            "call_id": call_id,
+                            "status": status
+                        }))
                 except Exception as e:
                     print(f"[VAPI LIVE] Error updating call status: {e}")
 
@@ -2392,6 +2300,23 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
                 }
                 try:
                     await asyncio.to_thread(lambda: supabase.table('transcripts').insert(t_data).execute())
+                except Exception as e:
+                    print(f"[VAPI LIVE] Error saving transcript: {e}")
+                    # Retry logic for Foreign Key Violation (race condition where call doesn't exist yet)
+                    if "foreign key" in str(e).lower() or "constraint" in str(e).lower():
+                        print(f"[VAPI LIVE] Missing parent call {call_id}, creating placeholder...")
+                        try:
+                            parent_data = {
+                                "call_id": call_id,
+                                "status": "in-progress",
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }
+                            await asyncio.to_thread(lambda: supabase.table('vapi_calls').upsert(parent_data, on_conflict='call_id').execute())
+                            # Retry transcript insert
+                            await asyncio.to_thread(lambda: supabase.table('transcripts').insert(t_data).execute())
+                            print(f"[VAPI LIVE] Retry successful for transcript.")
+                        except Exception as e2:
+                            print(f"[VAPI LIVE] Retry failed: {e2}")
                 except Exception as e:
                     print(f"[VAPI LIVE] Error saving transcript: {e}")
 

@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - VoxAnalyze</title>
+    <title>Login - 10xDS Debt Collection</title>
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap"
         rel="stylesheet">
@@ -249,7 +249,7 @@
             position: relative;
         }
 
-        .input-wrapper i {
+        .input-wrapper i.form-icon {
             position: absolute;
             left: 16px;
             top: 50%;
@@ -258,6 +258,22 @@
             font-size: 1rem;
             transition: all 0.3s ease;
             z-index: 2;
+        }
+
+        .input-wrapper .toggle-password {
+            position: absolute;
+            right: 16px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            cursor: pointer;
+            z-index: 2;
+            transition: color 0.3s ease;
+            padding: 4px;
+        }
+
+        .input-wrapper .toggle-password:hover {
+            color: var(--accent-primary);
         }
 
         .form-group input {
@@ -474,24 +490,25 @@
                 <div class="logo-icon">
                     <i class="fa-solid fa-wave-square"></i>
                 </div>
-                <div class="logo-text">VoxAnalyze</div>
-                <div class="logo-subtitle">Intelligent Call Analytics</div>
+                <div class="logo-text">10xDS Debt Collection</div>
+                <div class="logo-subtitle">Debt Collection Dashboard</div>
             </div>
 
             <form id="login-form" class="login-form">
                 <div class="form-group">
                     <label for="email">Email Address</label>
                     <div class="input-wrapper">
-                        <i class="fa-regular fa-envelope"></i>
+                        <i class="fa-regular fa-envelope form-icon"></i>
                         <input type="email" id="email" required placeholder="name@company.com" autocomplete="email">
                     </div>
                 </div>
                 <div class="form-group">
                     <label for="password">Password</label>
                     <div class="input-wrapper">
-                        <i class="fa-solid fa-lock"></i>
+                        <i class="fa-solid fa-lock form-icon"></i>
                         <input type="password" id="password" required placeholder="Enter your password"
                             autocomplete="current-password">
+                        <i class="fa-solid fa-eye toggle-password" id="password-toggle"></i>
                     </div>
                 </div>
                 <button type="submit" class="login-btn">
@@ -521,6 +538,16 @@
 
         const loginForm = document.getElementById('login-form');
         const errorMsg = document.getElementById('error-msg');
+        const passwordInput = document.getElementById('password');
+        const passwordToggle = document.getElementById('password-toggle');
+
+        // Toggle password visibility
+        passwordToggle.addEventListener('click', () => {
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            passwordToggle.classList.toggle('fa-eye');
+            passwordToggle.classList.toggle('fa-eye-slash');
+        });
 
         loginForm.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -564,7 +591,13 @@
 
             } catch (err) {
                 console.error(err);
-                errorMsg.textContent = err.message || 'Login failed. Please try again.';
+
+                let message = err.message || 'Login failed. Please try again.';
+                if (err.status === 400 || err.message?.includes('Invalid login credentials')) {
+                    message = '<strong>Invalid credentials.</strong> Please check your email and password, or ensure your account is created in the Supabase dashboard.';
+                }
+
+                errorMsg.innerHTML = message;
                 errorMsg.style.display = 'block';
                 btn.innerHTML = 'Sign In <i class="fa-solid fa-arrow-right"></i>';
                 btn.disabled = false;

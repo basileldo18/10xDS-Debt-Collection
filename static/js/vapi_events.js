@@ -24,6 +24,9 @@ window.initializeVapiEvents = async (widget) => {
         const callId = event.detail?.id || event.detail?.callId;
         const startedAt = event.detail?.startedAt || event.detail?.timestamp;
 
+        // Show indicator in sidebar regardless of modal opening
+        window.showSidebarLiveIndicator();
+
         // Only open automatically if the call is "fresh" (started in the last 15 seconds)
         // This prevents auto-opening for stale/active sessions on page load
         const isFresh = !startedAt || (new Date() - new Date(startedAt)) < 15000;
@@ -37,7 +40,7 @@ window.initializeVapiEvents = async (widget) => {
     });
 
     // --- 2. Call End (Trigger Processing & Fallbacks) ---
-    const endEvents = ['call-end', 'call-ended'];
+    const endEvents = ['call-end', 'call-ended', 'hang-up', 'disconnect', 'error'];
     endEvents.forEach(evtName => {
         widget.addEventListener(evtName, (event) => {
             console.log(`[Vapi] ${evtName} event fired:`, event.detail);
@@ -55,17 +58,51 @@ window.initializeVapiEvents = async (widget) => {
             const startedAt = detail.call?.startedAt || detail.timestamp;
             const isFresh = !startedAt || (new Date() - new Date(startedAt)) < 15000;
 
+            window.showSidebarLiveIndicator();
+
             if (callId && window.openLiveModal && isFresh) {
                 window.openLiveModal(callId);
             }
-        } else if (detail.type === 'call-end' || detail.status === 'ended') {
+        } else if (
+            detail.type === 'call-end' ||
+            detail.type === 'call-ended' ||
+            detail.type === 'hang-up' ||
+            detail.type === 'disconnect' ||
+            detail.status === 'ended' ||
+            detail.status === 'error' ||
+            detail.status === 'failed'
+        ) {
             handleVapiCallEnd(detail);
         }
     });
 };
 
+window.showSidebarLiveIndicator = function () {
+    const indicator = document.getElementById('live-call-count');
+    if (indicator) {
+        indicator.style.display = 'inline-flex';
+        indicator.textContent = 'Live';
+    }
+}
+
+window.hideSidebarLiveIndicator = function () {
+    const indicator = document.getElementById('live-call-count');
+    if (indicator) {
+        indicator.style.display = 'none';
+    }
+}
+
 async function handleVapiCallEnd(callDetail) {
     console.log('[Vapi] Handling call end:', callDetail);
+
+    // Automatically hide the indicator in sidebar
+    window.hideSidebarLiveIndicator();
+
+    // Automatically close the modal when call ends if it's open
+    if (window.closeLiveModal) {
+        console.log('[Vapi] Closing live modal as call ended.');
+        window.closeLiveModal();
+    }
 
     // Extract recording URL if available immediately
     const recordingUrl = callDetail?.recordingUrl ||

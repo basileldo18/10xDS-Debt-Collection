@@ -1,5 +1,5 @@
 // ============================================
-// VoxAnalyze Dashboard - Main JavaScript
+// 10xDS Debt Collection Dashboard - Main JavaScript
 // Modern, Interactive Dashboard Logic
 // ============================================
 
@@ -20,16 +20,20 @@ let allCalls = [];
 let currentSearchTerm = '';
 let sentimentChart = null;
 let categoriesChart = null;
+let performanceChart = null;
+let callsVsPaymentsChart = null;
+let funnelChart = null;
 let currentOffset = 0;
 const PAGE_SIZE = 20;
 let hasMoreCalls = true;
 let totalCallsCount = 0;
 let globalStats = null;
+let currentAnalyticsDays = 30; // Track the time filter for the analytics page
 let currentFilters = {
     sentiments: ['positive', 'neutral', 'negative'],
     dateFrom: null,
     dateTo: null,
-    tags: ['Support', 'Billing', 'Technical Issue', 'Churn Risk', 'Sales', 'Feedback', 'Complaint']
+    tags: ['Right Party Contact', 'PTP', 'Refusal', 'Dispute', 'Wrong Number', 'Callback Requested', 'Support', 'Billing']
 };
 
 class NotificationService {
@@ -76,11 +80,52 @@ class NotificationService {
             return;
         }
 
+        // Handle vapi_call_started
+        if (data.type === 'vapi_call_started') {
+            this.showToast('📞 Call Started', data.message || 'A new live call is in progress.', 'success', 'fa-headset');
+
+            // Show indicator in sidebar
+            if (window.showSidebarLiveIndicator) {
+                window.showSidebarLiveIndicator();
+            } else {
+                const indicator = document.getElementById('live-call-count');
+                if (indicator) {
+                    indicator.style.display = 'inline-flex';
+                    indicator.textContent = 'Live';
+                }
+            }
+
+            // Refresh live calls list to show the new call in the table
+            if (typeof window.fetchLiveCalls === 'function') {
+                window.fetchLiveCalls();
+            }
+            return;
+        }
+
+        // Handle vapi_call_ended
+        if (data.type === 'vapi_call_ended') {
+            console.log('[NOTIFY] Live call ended:', data.call_id);
+
+            // Hide indicator in sidebar
+            if (window.hideSidebarLiveIndicator) {
+                window.hideSidebarLiveIndicator();
+            } else {
+                const indicator = document.getElementById('live-call-count');
+                if (indicator) indicator.style.display = 'none';
+            }
+
+            // Refresh live calls list to ensure sidebar badge stays in sync with actual DB state
+            if (typeof window.fetchLiveCalls === 'function') {
+                window.fetchLiveCalls();
+            }
+            return;
+        }
+
         // Handle different processing steps
         if (data.step) {
             const stepConfig = {
                 'start': { title: '🎙️ New Call', icon: 'fa-microphone', type: 'processing' },
-                'drive_import': { title: '📂 Google Drive', icon: 'fa-brands fa-google-drive', type: 'info' },
+
                 'download': { title: '⬇️ Downloading', icon: 'fa-download', type: 'processing' },
                 'upload': { title: '☁️ Storage Upload', icon: 'fa-cloud-upload-alt', type: 'processing' },
                 'analyze': { title: '🧠 AI Analysis', icon: 'fa-brain', type: 'processing' },
@@ -103,7 +148,7 @@ class NotificationService {
             const shouldShowToast =
                 data.status === 'complete' ||  // Show all completion notifications
                 data.status === 'error' ||      // Show all errors
-                ['drive_import', 'transcribe', 'analyze', 'upload', 'save'].includes(data.step) && data.status === 'active'; // Show active for major steps
+                ['transcribe', 'analyze', 'upload', 'save'].includes(data.step) && data.status === 'active'; // Show active for major steps
 
             if (shouldShowToast) {
                 this.showToast(config.title, data.message, toastType, config.icon);
@@ -130,8 +175,11 @@ class NotificationService {
 
             // Show final success message when completely done
             if (data.step === 'done' && data.status === 'success') {
-                console.log('[NOTIFY] Analysis fully complete.');
-                // Dashboard already refreshed at 'save' step, just show completion message
+                console.log('[NOTIFY] Analysis fully complete. Triggering final refresh.');
+                // Refresh dashboard when the completion notification arrives
+                if (typeof fetchCalls === 'function') {
+                    fetchCalls(false, true);
+                }
                 this.showToast('✨ Processing Complete', 'Your dashboard has been updated!', 'success', 'fa-sparkles');
             }
         }
@@ -150,7 +198,7 @@ class NotificationService {
         const map = {
             'start': 'Call Received',
             'download': 'Downloading',
-            'upload': 'Google Drive',
+            'upload': 'Uploading',
             'analyze': 'Analyzing',
         };
         return map[step] || (typeof step === 'string' ? step.charAt(0).toUpperCase() + step.slice(1) : 'Processing');
@@ -200,6 +248,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     initializeProfileDropdown();
     initializeLoadMoreButton();
     initializeFilterModal();
+    initializeExcelUploadButton();
+    initializeAnalyticsFilter();
 
     // Initialize Real-time Notifications
     window.notificationService = new NotificationService();
@@ -244,6 +294,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Setup Logout
     setupLogout();
 
+    // Initial navigation state
+    updatePageTitle('dashboard');
+
     // Fetch and Display Data
     await fetchCalls(false, true); // Force initial load
 
@@ -267,6 +320,25 @@ function hidePageLoader() {
         setTimeout(() => {
             loader.style.display = 'none';
         }, 500);
+    }
+}
+
+// ============================================
+// Analytics Loader Helpers
+// ============================================
+function showAnalyticsLoader() {
+    const loader = document.getElementById('analytics-loader');
+    if (loader) {
+        loader.classList.add('active');
+        document.body.style.overflow = 'hidden'; // Prevent scrolling
+    }
+}
+
+function hideAnalyticsLoader() {
+    const loader = document.getElementById('analytics-loader');
+    if (loader) {
+        loader.classList.remove('active');
+        document.body.style.overflow = ''; // Restore scrolling
     }
 }
 
@@ -310,7 +382,7 @@ function initializeFilterModal() {
                 sentiments: ['positive', 'neutral', 'negative'],
                 dateFrom: null,
                 dateTo: null,
-                tags: ['Support', 'Billing', 'Technical Issue', 'Churn Risk', 'Sales', 'Feedback', 'Complaint']
+                tags: ['Right Party Contact', 'PTP', 'Refusal', 'Dispute', 'Wrong Number', 'Callback Requested', 'Support', 'Billing']
             };
             syncFilterUI();
             applyFilters();
@@ -393,20 +465,23 @@ function initializeSidebarNavigation() {
     const sectionMapping = {
         'dashboard': ['dashboard-section', 'analytics-section', 'calls-section'],
         'calls': ['calls-section'],
-        'analytics': ['analytics-section'],
+        'analytics': ['analytics-section', 'performance-section'],
         'reports': ['reports-section'],
         'settings': ['settings-section'],
-        'live-calls': ['live-calls-section']
+        'live-calls': ['live-calls-section'],
+        'pending-list': ['pending-list-section']
     };
 
     // All possible sections
     const allSections = [
         'dashboard-section',
         'analytics-section',
+        'performance-section',
         'calls-section',
         'settings-section',
         'reports-section',
-        'live-calls-section'
+        'live-calls-section',
+        'pending-list-section'
     ];
 
     // Initialize: Show only dashboard sections on load
@@ -430,6 +505,11 @@ function initializeSidebarNavigation() {
 
                     // Show the appropriate sections
                     showSection(sectionName, sectionMapping, allSections);
+
+                    // If pending-list is selected, fetch the leads
+                    if (sectionName === 'pending-list') {
+                        fetchPendingLeads();
+                    }
 
                     // Update page title based on section
                     updatePageTitle(sectionName);
@@ -467,6 +547,11 @@ function showSection(sectionName, sectionMapping, allSections) {
             }
         }
     });
+
+    // Scoped Stats Management: Ensure Analytics filter doesn't leak to Dashboard
+    if (sectionName === 'analytics' || sectionName === 'dashboard') {
+        fetchStats(); // This will now automatically use the correct context (currentAnalyticsDays or 30)
+    }
 }
 
 // ============================================
@@ -482,13 +567,80 @@ function updatePageTitle(section) {
         'analytics': { title: 'Analytics', subtitle: 'Sentiment distribution and category insights' },
         'reports': { title: 'Reports', subtitle: 'Generate and download reports' },
         'settings': { title: 'Settings', subtitle: 'Manage your account and preferences' },
-        'live-calls': { title: 'Live Calls', subtitle: 'Monitor active Vapi conversations in real-time' }
+        'live-calls': { title: 'Live Calls', subtitle: 'Monitor active Vapi conversations in real-time' },
+        'pending-list': { title: 'Pending Analysis', subtitle: 'View calls currently in the processing queue' }
     };
 
     const titleData = titles[section] || titles['dashboard'];
 
     if (pageTitle) pageTitle.textContent = titleData.title;
     if (pageSubtitle) pageSubtitle.textContent = titleData.subtitle;
+
+    // Toggle analytics filters
+    const analyticsFilters = document.getElementById('analytics-filters-container');
+    if (analyticsFilters) {
+        analyticsFilters.style.display = (section === 'analytics') ? 'flex' : 'none';
+    }
+}
+
+// ============================================
+// Analytics Filter Setup (Custom Dropdown)
+// ============================================
+function initializeAnalyticsFilter() {
+    const dropdown = document.getElementById('custom-time-filter');
+    const trigger = document.getElementById('time-filter-trigger');
+    const menu = document.getElementById('time-filter-menu');
+    const triggerText = document.getElementById('time-filter-text');
+
+    if (!dropdown || !trigger || !menu) return;
+
+    // Toggle Dropdown
+    trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        dropdown.classList.toggle('open');
+    });
+
+    // Handle Item Selection
+    menu.querySelectorAll('.dropdown-item').forEach(item => {
+        item.addEventListener('click', async (e) => {
+            e.stopPropagation();
+
+            // Remove active from all
+            menu.querySelectorAll('.dropdown-item').forEach(i => i.classList.remove('active'));
+
+            // Add active to clicked
+            item.classList.add('active');
+
+            // Update trigger text
+            const selectedText = item.querySelector('.item-text').textContent;
+            triggerText.textContent = selectedText;
+
+            // Get value
+            const days = parseInt(item.dataset.value);
+            currentAnalyticsDays = days;
+            console.log(`[FILTER] Time range changed to ${days} days (${selectedText})`);
+
+            // Close dropdown
+            dropdown.classList.remove('open');
+
+            // Show Loader & Fetch Data
+            showAnalyticsLoader();
+            try {
+                await fetchStats(days);
+            } catch (err) {
+                console.error('[FILTER] Error updates stats:', err);
+            } finally {
+                hideAnalyticsLoader();
+            }
+        });
+    });
+
+    // Close when clicking outside
+    document.addEventListener('click', (e) => {
+        if (!dropdown.contains(e.target)) {
+            dropdown.classList.remove('open');
+        }
+    });
 }
 
 // ============================================
@@ -514,6 +666,17 @@ function setupUserProfile(user) {
 
     if (userAvatarEl) {
         userAvatarEl.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName)}&background=6366f1&color=fff&size=80`;
+    }
+
+    // Also update dropdown elements
+    const dropdownNameEl = document.getElementById('dropdown-user-name');
+    const dropdownEmailEl = document.getElementById('dropdown-user-email');
+    const dropdownAvatarEl = document.getElementById('dropdown-avatar');
+
+    if (dropdownNameEl) dropdownNameEl.textContent = fullName;
+    if (dropdownEmailEl) dropdownEmailEl.textContent = user.email || '';
+    if (dropdownAvatarEl) {
+        dropdownAvatarEl.src = `https://ui-avatars.com/api/?name=${encodeURIComponent(fullName)}&background=6366f1&color=fff&size=80`;
     }
 }
 
@@ -584,6 +747,8 @@ function initializeProfileDropdown() {
 // ============================================
 function initializeRefreshButton() {
     const refreshBtn = document.getElementById('refresh-btn');
+    const refreshLiveBtn = document.getElementById('refresh-live-calls');
+    const refreshPendingBtn = document.getElementById('refresh-pending-list');
 
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async () => {
@@ -593,6 +758,31 @@ function initializeRefreshButton() {
             refreshBtn.classList.remove('loading');
             showToast('Data refreshed successfully', 'success');
         });
+    }
+
+    if (refreshLiveBtn) {
+        refreshLiveBtn.addEventListener('click', async () => {
+            const icon = refreshLiveBtn.querySelector('i');
+            if (icon) icon.classList.add('fa-spin');
+            // assuming fetchLiveCalls exists, or we trigger common live refresh
+            if (window.refreshLiveCalls) await window.refreshLiveCalls();
+            if (icon) icon.classList.remove('fa-spin');
+        });
+    }
+
+    if (refreshPendingBtn) {
+        refreshPendingBtn.addEventListener('click', async () => {
+            const icon = refreshPendingBtn.querySelector('i');
+            if (icon) icon.classList.add('fa-spin');
+            await fetchPendingLeads();
+            if (icon) icon.classList.remove('fa-spin');
+            showToast('Pending list refreshed', 'success');
+        });
+    }
+
+    const clearPendingBtn = document.getElementById('clear-pending-list');
+    if (clearPendingBtn) {
+        clearPendingBtn.addEventListener('click', clearPendingLeads);
     }
 }
 
@@ -1112,6 +1302,292 @@ function initializeUploadButton() {
 }
 
 // ============================================
+// Excel Upload Button
+// ============================================
+function initializeExcelUploadButton() {
+    const excelUploadBtn = document.getElementById('upload-excel-btn');
+    const excelUploadModal = document.getElementById('excel-upload-modal');
+    const excelModalClose = document.getElementById('excel-upload-modal-close');
+    const excelCancelBtn = document.getElementById('excel-upload-cancel');
+    const excelSubmitBtn = document.getElementById('excel-upload-submit');
+    const excelDropZone = document.getElementById('excel-drop-zone');
+    const excelFileInput = document.getElementById('excel-file-input');
+    const selectedFileContainer = document.getElementById('excel-selected-file-container');
+    const excelFileInfo = document.getElementById('excel-file-info');
+    const clearFileBtn = document.getElementById('excel-clear-file');
+    const progressSection = document.getElementById('excel-progress-section');
+    const progressBar = document.getElementById('excel-progress-bar');
+    const progressPercent = document.getElementById('excel-percent');
+    const statusText = document.getElementById('excel-status-text');
+
+    if (!excelUploadBtn || !excelUploadModal) return;
+
+    let selectedFile = null;
+
+    // Open modal
+    excelUploadBtn.addEventListener('click', () => {
+        excelUploadModal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+        resetExcelModal();
+    });
+
+    // Close modal
+    const closeModal = () => {
+        excelUploadModal.style.display = 'none';
+        document.body.style.overflow = '';
+        resetExcelModal();
+    };
+
+    if (excelModalClose) excelModalClose.addEventListener('click', closeModal);
+    if (excelCancelBtn) excelCancelBtn.addEventListener('click', closeModal);
+    excelUploadModal.addEventListener('click', (e) => {
+        if (e.target === excelUploadModal) closeModal();
+    });
+
+    // Reset modal
+    function resetExcelModal() {
+        selectedFile = null;
+        if (excelFileInput) excelFileInput.value = '';
+        if (excelDropZone) excelDropZone.style.display = 'block';
+        if (selectedFileContainer) selectedFileContainer.style.display = 'none';
+        if (progressSection) progressSection.style.display = 'none';
+        if (progressBar) progressBar.style.width = '0%';
+        if (progressPercent) progressPercent.textContent = '0%';
+        if (statusText) statusText.textContent = 'Processing excel sheet...';
+        if (excelSubmitBtn) {
+            excelSubmitBtn.disabled = true;
+            excelSubmitBtn.innerHTML = '<i class="fa-solid fa-upload"></i> Upload Sheet';
+        }
+    }
+
+    // Drop zone handling
+    if (excelDropZone) {
+        excelDropZone.addEventListener('click', () => excelFileInput.click());
+
+        excelDropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            excelDropZone.style.borderColor = 'var(--accent-primary)';
+            excelDropZone.style.background = 'rgba(99, 102, 241, 0.05)';
+        });
+
+        excelDropZone.addEventListener('dragleave', () => {
+            excelDropZone.style.borderColor = '#16a34a';
+            excelDropZone.style.background = 'rgba(22, 163, 74, 0.05)';
+        });
+
+        excelDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            if (e.dataTransfer.files.length > 0) {
+                handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+    }
+
+    if (excelFileInput) {
+        excelFileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+    }
+
+    function handleFileSelect(file) {
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!['xlsx', 'xls', 'csv'].includes(ext)) {
+            showToast('Please select a valid Excel or CSV file', 'error');
+            return;
+        }
+
+        selectedFile = file;
+        if (excelDropZone) excelDropZone.style.display = 'none';
+        if (selectedFileContainer) selectedFileContainer.style.display = 'block';
+
+        if (excelFileInfo) {
+            excelFileInfo.innerHTML = `
+                <div style="display: flex; align-items: center; gap: 12px; padding: 12px; background: rgba(0,0,0,0.02); border-radius: 8px;">
+                    <i class="fa-solid fa-file-excel" style="font-size: 1.5rem; color: #16a34a;"></i>
+                    <div style="flex: 1;">
+                        <div style="font-weight: 600; color: var(--text-primary);">${file.name}</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary);">${(file.size / 1024).toFixed(1)} KB</div>
+                    </div>
+                </div>
+            `;
+        }
+        if (excelSubmitBtn) excelSubmitBtn.disabled = false;
+    }
+
+    if (clearFileBtn) clearFileBtn.addEventListener('click', resetExcelModal);
+
+    // Handle upload submit
+    if (excelSubmitBtn) {
+        excelSubmitBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+
+            excelSubmitBtn.disabled = true;
+            excelSubmitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Uploading...';
+            if (progressSection) progressSection.style.display = 'block';
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            try {
+                // Real upload
+                const response = await fetch('/api/pending/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (response.ok) {
+                    const result = await response.json();
+
+                    if (progressBar) progressBar.style.width = '100%';
+                    if (progressPercent) progressPercent.textContent = '100%';
+                    if (statusText) statusText.textContent = 'Upload complete!';
+
+                    showToast(result.message || 'Excel file uploaded successfully', 'success');
+
+                    // Refresh the table
+                    fetchPendingLeads();
+
+                    setTimeout(closeModal, 1000);
+                } else {
+                    const error = await response.json();
+                    throw new Error(error.detail || error.error || 'Upload failed');
+                }
+
+            } catch (err) {
+                console.error('[EXCEL UPLOAD] Error:', err);
+                showToast(err.message || 'Failed to upload Excel file', 'error');
+                excelSubmitBtn.disabled = false;
+                excelSubmitBtn.innerHTML = '<i class="fa-solid fa-upload"></i> Upload Sheet';
+            }
+        });
+    }
+}
+
+// ============================================
+// Pending List Data Management
+// ============================================
+let pendingLeads = [];
+
+async function fetchPendingLeads() {
+    const tableBody = document.getElementById('pending-calls-table-body');
+    if (!tableBody) return;
+
+    try {
+        const response = await fetch('/api/pending/leads');
+        if (response.ok) {
+            pendingLeads = await response.json();
+            renderPendingLeadsTable();
+        }
+    } catch (err) {
+        console.error('[FETCH LEADS] Error:', err);
+    }
+}
+
+function renderPendingLeadsTable() {
+    const tableBody = document.getElementById('pending-calls-table-body');
+    const tableHeader = document.getElementById('pq-table-header-row');
+    const countBadge = document.getElementById('pq-queue-count');
+
+    if (!tableBody) return;
+
+    // Update count badge
+    if (countBadge) countBadge.textContent = pendingLeads ? pendingLeads.length : 0;
+
+    if (!pendingLeads || pendingLeads.length === 0) {
+        // Reset header
+        if (tableHeader) {
+            tableHeader.innerHTML = `<th style="width:5%">No.</th><th>Data</th><th>Uploaded</th><th>Call Scheduled On</th>`;
+        }
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="4" style="padding:0;border:none;">
+                    <div class="pq-empty-state">
+                        <div class="pq-empty-icon">
+                            <i class="fa-solid fa-hourglass-half"></i>
+                        </div>
+                        <h3>No Pending Calls</h3>
+                        <p>Upload an Excel file to add calls to the queue</p>
+                        <button class="pq-btn pq-btn-success" onclick="document.getElementById('upload-excel-btn').click()" style="margin-top:16px;">
+                            <i class="fa-solid fa-file-arrow-up"></i> Upload Excel
+                        </button>
+                    </div>
+                </td>
+            </tr>`;
+        return;
+    }
+
+    // Dynamic headers from first lead's data keys
+    const firstLead = pendingLeads[0].lead_data;
+    const keys = Object.keys(firstLead).filter(k => !k.toLowerCase().includes('comment'));
+
+    if (tableHeader) {
+        tableHeader.innerHTML = `
+            <th class="pq-th-num">#</th>
+            ${keys.map(k => `<th>${k.charAt(0).toUpperCase() + k.slice(1).replace(/_/g, ' ')}</th>`).join('')}
+            <th>Uploaded</th>
+            <th>Call Scheduled On</th>
+        `;
+    }
+
+    tableBody.innerHTML = pendingLeads.map((lead, idx) => {
+        const date = new Date(lead.created_at);
+        const dateStr = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+        const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        // Always use current time + 2 hours
+        const scheduledDate = new Date();
+        scheduledDate.setHours(scheduledDate.getHours() + 2);
+        const scheduledDateStr = scheduledDate.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
+        const scheduledTimeStr = scheduledDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        const data = lead.lead_data;
+
+        return `
+            <tr class="pq-row">
+                <td><span class="pq-row-num">${idx + 1}</span></td>
+                ${keys.map(k => {
+            const val = String(data[k] || '');
+            // Detect numeric/currency values
+            const isNum = !isNaN(val) && val.trim() !== '';
+            return `<td class="${isNum ? 'pq-td-num' : 'pq-td-text'}">${escapeHtml(val)}</td>`;
+        }).join('')}
+                <td>
+                    <div class="pq-date-chip">
+                        <i class="fa-solid fa-clock" style="font-size:0.65rem;opacity:0.6;"></i>
+                        ${dateStr}
+                    </div>
+                    <div class="pq-time-chip">${timeStr}</div>
+                </td>
+                <td>
+                    <div class="pq-date-chip" style="background: rgba(34, 197, 94, 0.1); border-color: rgba(34, 197, 94, 0.2); color: #22c55e;">
+                        <i class="fa-solid fa-calendar-check" style="font-size:0.65rem;opacity:0.6;"></i>
+                        ${scheduledDateStr}
+                    </div>
+                    <div class="pq-time-chip" style="color: #22c55e;">${scheduledTimeStr}</div>
+                </td>
+            </tr>`;
+    }).join('');
+}
+
+
+
+async function clearPendingLeads() {
+    if (!confirm('This will clear the entire pending queue. Are you sure?')) return;
+
+    try {
+        const response = await fetch('/api/pending/leads', { method: 'DELETE' });
+        if (response.ok) {
+            showToast('Pending queue cleared', 'success');
+            fetchPendingLeads();
+        }
+    } catch (err) {
+        console.error('[CLEAR LEADS] Error:', err);
+    }
+}
+
+// ============================================
 // Fetch Calls Data
 // ============================================
 // ============================================
@@ -1120,11 +1596,16 @@ function initializeUploadButton() {
 function loadSettings() {
     const defaults = {
         pageSize: '25',
-        autoRefresh: '20',
+        autoRefresh: '5',
         dateFormat: 'short'
     };
     try {
         const saved = JSON.parse(localStorage.getItem('voxanalyze-settings'));
+        // Migration: Update old default 20s to new 5s automatically
+        if (saved && saved.autoRefresh === '20') {
+            saved.autoRefresh = '5';
+            localStorage.setItem('voxanalyze-settings', JSON.stringify(saved));
+        }
         return { ...defaults, ...saved };
     } catch (e) { return defaults; }
 }
@@ -1138,7 +1619,7 @@ async function syncSettingsFromApi() {
                 // Merge with defaults to ensure complete object
                 const defaults = {
                     pageSize: '25',
-                    autoRefresh: '20',
+                    autoRefresh: '5',
                     dateFormat: 'short'
                 };
                 const merged = { ...defaults, ...apiSettings };
@@ -1196,12 +1677,19 @@ function timeAgo(date) {
 // ============================================
 const autoRefreshTimerObj = { id: null };
 let lastFetchTime = 0;
-const MIN_FETCH_INTERVAL = 20000; // 20 seconds in milliseconds
+const MIN_FETCH_INTERVAL = 2000; // Reduced to 2 seconds to allow 5s refresh
 
-async function fetchStats() {
+async function fetchStats(days = null) {
+    // Determine days based on active context if not explicitly provided
+    if (days === null) {
+        const isAnalyticsActive = document.querySelector('.nav-item[data-section="analytics"]')?.classList.contains('active');
+        days = isAnalyticsActive ? currentAnalyticsDays : 30;
+    }
+
     try {
-        console.log('[API CHECK] Fetching call statistics...');
-        const response = await fetch('/api/call-stats');
+        console.log(`[API CHECK] Fetching call statistics for last ${days} days...`);
+        const url = days > 0 ? `/api/call-stats?days=${days}` : '/api/call-stats';
+        const response = await fetch(url);
 
         if (response.ok) {
             const result = await response.json();
@@ -1210,6 +1698,10 @@ async function fetchStats() {
                 console.log('[API CHECK] Stats received:', globalStats);
                 updateStats(globalStats);
                 initializeCategoriesChart(globalStats.tag_counts);
+                initializePerformanceChart(globalStats.performance_trend);
+                initializeCallsVsPaymentsChart(globalStats.weekly_activity);
+                initializeFunnelChart(globalStats.funnel);
+                initializeComplianceChart();
                 initializeSentimentChart();
             }
         }
@@ -1222,12 +1714,12 @@ async function fetchCalls(append = false, force = false) {
     // Throttle API calls to prevent excessive requests
     const now = Date.now();
     if (!force && !append && (now - lastFetchTime) < MIN_FETCH_INTERVAL) {
-        console.log(`[API THROTTLE] Skipping fetch - only ${Math.round((now - lastFetchTime) / 1000)}s since last fetch (min: 20s)`);
+        console.log(`[API THROTTLE] Skipping fetch - only ${Math.round((now - lastFetchTime) / 1000)}s since last fetch (min: 2s)`);
         return;
     }
 
     const loadingState = document.getElementById('loading-state');
-    const emptyState = document.getElementById('empty-state');
+    const emptyState = document.getElementById('calls-empty-state');
     const tableContainer = document.querySelector('.table-container');
     const loadMoreContainer = document.getElementById('load-more-container');
     const loadMoreBtn = document.getElementById('load-more-btn');
@@ -1291,6 +1783,7 @@ async function fetchCalls(append = false, force = false) {
             if (tableContainer) tableContainer.style.display = 'none';
             if (loadMoreContainer) loadMoreContainer.style.display = 'none';
         } else {
+            if (emptyState) emptyState.style.display = 'none';
             if (tableContainer) tableContainer.style.display = 'block';
             if (loadMoreContainer) {
                 loadMoreContainer.style.display = hasMoreCalls ? 'block' : 'none';
@@ -1369,7 +1862,7 @@ function renderTable(callsInput) {
     if (calls.length === 0) {
         tbody.innerHTML = `
             <tr>
-                <td colspan="8" style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                <td colspan="9" style="text-align: center; padding: 40px; color: var(--text-secondary);">
                     No calls match your search criteria
                 </td>
             </tr>
@@ -1397,16 +1890,6 @@ function renderTable(callsInput) {
             sentimentClass = 'negative';
         }
 
-        // Format tags (show only first tag for compact display)
-        const tags = call.tags || [];
-        const firstTag = tags.length > 0 ? tags[0] : 'None';
-        let tagClass = 'default';
-        const lower = firstTag.toLowerCase();
-        if (lower.includes('bill')) tagClass = 'billing';
-        if (lower.includes('support') || lower.includes('help')) tagClass = 'support';
-        if (lower.includes('churn') || lower.includes('cancel')) tagClass = 'churn';
-        const tagsHtml = `<span class="tag ${tagClass}">${escapeHtml(firstTag)}</span>` +
-            (tags.length > 1 ? `<span class="tag default">+${tags.length - 1}</span>` : '');
 
         // Format date using Settings
         const dateStr = formatDate(call.created_at, settings.dateFormat);
@@ -1435,47 +1918,178 @@ function renderTable(callsInput) {
         }
 
         row.innerHTML = `
-            <td>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <span class="filename-cell" title="${escapeHtml(call.filename || 'Unknown')}" onclick="showFilenamePopup('${escapeHtml(call.filename || 'Unknown').replace(/'/g, "\\'")}', event)">${escapeHtml(call.filename || 'Unknown')}</span>
+            <td class="col-call-id">
+                <span class="txn-id">
+                    ${call.call_id || ('TXN-' + (2801 + (call.id || 0)))}
+                </span>
+            </td>
+            <td class="col-customer">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    ${(function () {
+                let customerName = 'Unknown';
+                let summaryData = null;
+                try {
+                    summaryData = typeof call.summary === 'string' ? JSON.parse(call.summary) : call.summary;
+                } catch (e) { }
+
+                if (summaryData) {
+                    // Comprehensive search for speakers data
+                    const speakers = summaryData.detected_speakers || summaryData.speakers || (summaryData.summary && summaryData.summary.detected_speakers);
+
+                    if (speakers && typeof speakers === 'object') {
+                        // Look for Speaker 2 specifically as requested
+                        customerName = speakers['Speaker 2'] ||
+                            speakers['speaker 2'] ||
+                            speakers['Speaker 2 name'] ||
+                            speakers['2'] ||
+                            speakers['Customer'] ||
+                            'Customer';
+                    }
+                }
+
+                // Final validation to avoid technical strings
+                if (customerName === 'Unknown' || customerName === 'Customer') {
+                    if (!call.summary || call.summary === '{}' || call.summary === '') {
+                        customerName = '<span style="opacity: 0.6; font-style: italic;">Pending...</span>';
+                    } else {
+                        customerName = 'Customer';
+                    }
+                }
+
+                return `<span class="filename-cell" title="${escapeHtml(call.filename || 'Unknown')}">${escapeHtml(customerName)}</span>`;
+            })()}
                 </div>
             </td>
-            <td>${dateStr}</td>
-            <td>
+            <td class="col-date">${dateStr}</td>
+            <td class="col-duration">
                 <span class="duration-badge">
                     <i class="fa-solid fa-clock"></i>
                     ${durationFormatted}
                 </span>
             </td>
-            <td>
+            <td class="col-sentiment">
                 <span class="sentiment-badge ${sentimentClass}">
                     <i class="fa-solid ${sentimentIcon}"></i>
                     ${call.sentiment || 'Neutral'}
                 </span>
             </td>
-            <td>
-                <div class="tags-cell">${tagsHtml}</div>
+            <td class="col-payment">
+                ${(function () {
+                let outcome = 'Pending';
+                let outcomeClass = 'warning';
+                let outcomeIcon = 'fa-hourglass-start';
+
+                // Check metrics
+                let metrics = null;
+                if (call.summary && typeof call.summary === 'object') {
+                    metrics = call.summary.collection_metrics;
+                } else if (typeof call.summary === 'string') {
+                    try {
+                        const parsed = JSON.parse(call.summary);
+                        metrics = parsed?.collection_metrics;
+                    } catch (e) { }
+                }
+
+                if (metrics && metrics.payment_outcome) {
+                    const raw = metrics.payment_outcome.toLowerCase();
+                    if (raw.includes('full')) { outcome = 'Paid Full'; outcomeClass = 'success'; outcomeIcon = 'fa-check-double'; }
+                    else if (raw.includes('partial')) { outcome = 'Partial'; outcomeClass = 'info'; outcomeIcon = 'fa-check'; }
+                    else if (raw.includes('promise')) { outcome = 'PTP'; outcomeClass = 'warning'; outcomeIcon = 'fa-handshake'; }
+                    else if (raw.includes('refus')) { outcome = 'Refused'; outcomeClass = 'danger'; outcomeIcon = 'fa-ban'; }
+                    else if (raw.includes('dispute')) { outcome = 'Dispute'; outcomeClass = 'danger'; outcomeIcon = 'fa-gavel'; }
+                    else { outcome = metrics.payment_outcome; outcomeClass = 'secondary'; outcomeIcon = 'fa-circle-question'; }
+                } else if (call.tags) {
+                    // Fallback to tags
+                    const tags = call.tags.map(t => t.toLowerCase());
+                    if (tags.some(t => t.includes('full payment'))) { outcome = 'Paid Full'; outcomeClass = 'success'; outcomeIcon = 'fa-check-double'; }
+                    else if (tags.some(t => t.includes('partial'))) { outcome = 'Partial'; outcomeClass = 'info'; outcomeIcon = 'fa-check'; }
+                    else if (tags.some(t => t.includes('refusal'))) { outcome = 'Refused'; outcomeClass = 'danger'; outcomeIcon = 'fa-ban'; }
+                    else if (tags.some(t => t.includes('promise'))) { outcome = 'PTP'; outcomeClass = 'warning'; outcomeIcon = 'fa-handshake'; }
+                }
+
+                let isClickable = outcome !== 'Paid Full' && outcome !== 'Pending';
+                let clickableClass = isClickable ? 'clickable' : '';
+
+                let badgeHtml = `<span class="badge ${outcomeClass} ${clickableClass}" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600;">
+                                <i class="fa-solid ${outcomeIcon}"></i> 
+                                ${outcome}
+                                ${isClickable ? '<i class="fa-solid fa-up-right-from-square" style="font-size: 0.6rem; opacity: 0.6; margin-left: 2px;"></i>' : ''}
+                            </span>`;
+
+                if (isClickable) {
+                    return `<button class="payment-btn" onclick="openPaymentModal('${call.id}')" title="View Payment Details">
+                                ${badgeHtml}
+                            </button>`;
+                } else {
+                    return badgeHtml;
+                }
+            })()}
             </td>
-            <td>
-                <button class="summary-btn" onclick="openSummaryModal(${call.id})">
-                    <i class="fa-solid fa-file-lines"></i>
-                    View
-                </button>
+            <td class="col-balance">
+                ${(function () {
+                // Constants & Initial Values
+                let totalDueInput = 0.00;
+                let collected = 0.00;
+                let method = '';
+
+                // helper
+                const parseMoney = (str) => {
+                    if (typeof str === 'number') return str;
+                    if (!str) return 0.0;
+                    return parseFloat(str.replace(/[^0-9.-]+/g, "")) || 0.0;
+                };
+
+                // Robust Parsing
+                let summaryData = null;
+                try {
+                    summaryData = typeof call.summary === 'string' ? JSON.parse(call.summary) : call.summary;
+                } catch (e) { }
+
+                let metrics = summaryData ? summaryData.collection_metrics : null;
+
+                if (metrics) {
+                    collected = parseMoney(metrics.amount_collected);
+                    totalDueInput = parseMoney(metrics.total_debt_amount || metrics.total_due || 0);
+
+                    if (metrics.payment_method && !metrics.payment_method.includes('N/A')) {
+                        method = metrics.payment_method;
+                    }
+                }
+
+                // Check for "Not Mentioned" cases
+                if (!summaryData || summaryData === '{}' || summaryData === '') {
+                    return `<span style="opacity: 0.6; font-style: italic; font-size: 0.75rem;">Pending...</span>`;
+                }
+
+                if (totalDueInput === 0 && collected === 0) {
+                    return `<span style="opacity: 0.5; color: var(--text-muted); font-size: 0.75rem;">Not Mentioned</span>`;
+                }
+
+                // Fallback: If no total due was extracted, but we collected something or it's a known placeholder
+                const TOTAL_DUE = totalDueInput > 0 ? totalDueInput : (collected > 0 ? Math.max(collected, 200.00) : 0.00);
+
+                const balance = Math.max(0, TOTAL_DUE - collected);
+                const balanceClass = balance > 0 ? 'balance-due' : 'balance-cleared';
+
+                return `<span class="balance-text ${balanceClass}">
+                            $${balance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </span>`;
+            })()}
             </td>
+
             <td>
-                <span class="email-badge ${emailBadgeClass}">
-                    <i class="fa-solid ${emailIcon}"></i>
-                    ${emailText}
+                <span class="badge ${call.medium === 'Phone' ? 'info' : (call.medium === 'Web' ? 'secondary' : 'neutral')}" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 600;">
+                    <i class="fa-solid ${call.medium === 'Phone' ? 'fa-phone' : (call.medium === 'Web' ? 'fa-globe' : 'fa-question')}"></i> ${call.medium || 'Unknown'}
                 </span>
             </td>
             <td>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <button class="action-btn" onclick="openModal(${call.id})">
+                <div style="display: flex; align-items: center; gap: 6px; justify-content: center;">
+                    <button class="action-btn details-btn" onclick="openModal('${call.id}')" title="View Details">
                         <i class="fa-solid fa-eye"></i>
-                        Details
+                        <span>Details</span>
                     </button>
                     <div class="action-menu-container">
-                        <button class="action-btn" onclick="toggleActionMenu(event, '${call.id}')">
+                        <button class="action-btn menu-trigger-btn" onclick="toggleActionMenu(event, '${call.id}')" title="More Actions">
                             <i class="fa-solid fa-ellipsis-vertical"></i>
                         </button>
                         <div class="action-dropdown" id="action-menu-${call.id}">
@@ -1546,6 +2160,7 @@ function toggleActionMenu(event, callId) {
         }
     });
 
+
     // Toggle current menu and container
     if (menu) {
         const isActive = menu.classList.toggle('active');
@@ -1571,6 +2186,103 @@ function toggleActionMenu(event, callId) {
     }
 }
 
+// Payment Modal Logic
+window.openPaymentModal = function (callId) {
+    const call = allCalls.find(c => c.id == callId);
+    if (!call) return;
+
+    const modal = document.getElementById('payment-outcome-modal');
+    if (!modal) return;
+
+    // Helper to get nested metrics
+    let summaryData = typeof call.summary === 'string' ? JSON.parse(call.summary) : call.summary;
+    const metrics = summaryData?.collection_metrics || {};
+
+    // 1. Set Customer Name
+    let customerName = 'Customer';
+    const speakers = summaryData?.detected_speakers || summaryData?.speakers;
+    if (speakers && speakers['Speaker 2']) customerName = speakers['Speaker 2'];
+    document.getElementById('payment-modal-customer').textContent = customerName;
+
+    // 2. Set Status Pill
+    const outcome = metrics.payment_outcome || 'Pending';
+    const statusTextEl = document.getElementById('payment-modal-status-text');
+    const statusPill = document.getElementById('payment-modal-status-pill');
+    statusTextEl.textContent = outcome;
+
+    statusPill.className = 'payment-status-pill';
+    const rawStatus = outcome.toLowerCase();
+    if (rawStatus.includes('full')) statusPill.classList.add('success');
+    else if (rawStatus.includes('partial') || rawStatus.includes('promise')) statusPill.classList.add('info');
+    else if (rawStatus.includes('refus') || rawStatus.includes('dispute')) statusPill.classList.add('danger');
+
+    // 3. Set Metrics
+    const formatCurrency = (amount) => {
+        const val = parseFloat(amount) || 0;
+        return `$${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} `;
+    };
+
+    const totalDebt = metrics.total_debt_amount || metrics.total_due || 0;
+    const collected = metrics.amount_collected || 0;
+    const balance = Math.max(0, totalDebt - collected);
+
+    document.getElementById('pm-total-debt').textContent = formatCurrency(totalDebt);
+    document.getElementById('pm-collected').textContent = formatCurrency(collected);
+    document.getElementById('pm-balance').textContent = formatCurrency(balance);
+
+    // Enhanced Next Date Fallback: If not in metrics, try to find in summary text
+    let nextDate = metrics.next_payment_date || 'N/A';
+    const summaryText = summaryData?.summary?.overview || summaryData?.overview || "";
+
+    if (nextDate === 'N/A' && summaryText) {
+        // Look for common date patterns like "February 28th", "Feb 28", "28th of Feb"
+        const dateMatch = summaryText.match(/(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}(?:st|nd|rd|th)?/i);
+        if (dateMatch) {
+            nextDate = dateMatch[0];
+        }
+    }
+
+    document.getElementById('pm-next-date').textContent = nextDate;
+
+    // 4. AI Summary
+    const summaryEl = document.getElementById('payment-modal-summary');
+    if (summaryData?.summary?.overview || summaryData?.overview) {
+        summaryEl.innerHTML = `<p>${summaryData?.summary?.overview || summaryData?.overview}</p>`;
+    } else {
+        summaryEl.innerHTML = `<p>No detailed summary available for this payment outcome.</p>`;
+    }
+
+    // 5. Settlement Box
+    const settlementBox = document.getElementById('pm-settlement-box');
+    const settlementText = document.getElementById('pm-settlement-details');
+
+    // Try to find settlement details in summary or metrics
+    const details = metrics.payment_plan_details || metrics.settlement_agreement || "";
+    if (details && details !== "N/A") {
+        settlementBox.style.display = 'flex';
+        settlementText.innerHTML = `<strong>Settlement Agreed:</strong> ${details} `;
+    } else {
+        settlementBox.style.display = 'none';
+    }
+
+    // 6. Transcript Action
+    const transcriptBtn = document.getElementById('btn-pm-view-transcript');
+    transcriptBtn.onclick = () => {
+        modal.style.display = 'none';
+        openModal(callId);
+    };
+
+    modal.style.display = 'flex';
+};
+
+window.closePaymentModal = function () {
+    const modal = document.getElementById('payment-outcome-modal');
+    if (modal) modal.style.display = 'none';
+};
+
+// Also attach to global object for easy access
+window.openPaymentModal.close = window.closePaymentModal;
+
 // ============================================
 // Delete Call Functionality
 // ============================================
@@ -1593,11 +2305,14 @@ function openDeleteModal(callId) {
             adminVerifyConfirm.onclick = null; // Use the event listener add for delete
         }
 
+        const warningBox = adminVerifyModal.querySelector('.admin-warning-box');
+        if (warningBox) warningBox.style.display = 'flex';
+
         deleteCallIdInput.value = callId;
         adminPasswordInput.value = ''; // Clear previous password
         adminVerifyModal.style.display = 'flex';
         // Close action menu
-        document.getElementById(`action-menu-${callId}`)?.classList.remove('active');
+        document.getElementById(`action - menu - ${callId} `)?.classList.remove('active');
     }
 }
 
@@ -1675,6 +2390,10 @@ function openReanalyzeModal(callId) {
     if (title) title.textContent = 'Re-analyze Call';
     if (desc) desc.textContent = 'Identify speakers using improved LLM logic';
 
+    // Hide deletion warning for re-analysis
+    const warningBox = modal.querySelector('.admin-warning-box');
+    if (warningBox) warningBox.style.display = 'none';
+
     // Clear password and store ID
     if (passwordInput) passwordInput.value = '';
 
@@ -1739,65 +2458,190 @@ function openReanalyzeModal(callId) {
 // ============================================
 function updateStats(data) {
     const totalEl = document.getElementById('total-calls');
-    const positiveEl = document.getElementById('positive-percent');
-    const negativeEl = document.getElementById('negative-percent');
+    const rpcEl = document.getElementById('rpc-stat');
+    const ptpEl = document.getElementById('ptp-stat');
     const durationEl = document.getElementById('avg-duration');
+    const casesResolvedEl = document.getElementById('cases-resolved');
 
-    if (!data) return;
+    let totalCallsCount = 0;
+    if (Array.isArray(data)) {
+        totalCallsCount = data.length;
+    } else if (data && typeof data === 'object') {
+        totalCallsCount = data.total_calls || data.total || 0;
+    }
 
-    // Total calls - Use the total count from DB
     if (totalEl) {
         animateCounter(totalEl, totalCallsCount);
     }
 
-    let positivePercent = 0;
-    let negativePercent = 0;
+    let rpcPercent = 0;
+    let ptpPercent = 0;
     let avgSeconds = 0;
+    let solved = 0;
 
     if (Array.isArray(data)) {
         // Fallback: Local calculation from provided array
-        const positiveCount = data.filter(c => (c.sentiment || '').toLowerCase() === 'positive').length;
-        positivePercent = data.length > 0 ? Math.round((positiveCount / data.length) * 100) : 0;
+        const rpcCount = data.filter(c => {
+            const tags = (c.tags || []).map(t => t.toLowerCase());
+            const rpcTerms = ['right party', 'verified', 'rpc', 'spoke to', 'contacted', 'identity confirmed', 'person reached', 'identity verified'];
+            return tags.some(t => rpcTerms.some(term => t.includes(term)));
+        }).length;
 
-        const negativeCount = data.filter(c => (c.sentiment || '').toLowerCase() === 'negative').length;
-        negativePercent = data.length > 0 ? Math.round((negativeCount / data.length) * 100) : 0;
+        const ptpCount = data.filter(c => {
+            const tags = (c.tags || []).map(t => t.toLowerCase());
+            const ptpTerms = ['promise', 'ptp', 'payment made', 'commitment', 'will pay', 'agreed', 'partial payment', 'full payment', 'commitment to pay'];
+            return tags.some(t => ptpTerms.some(term => t.includes(term)));
+        }).length;
+
+        rpcPercent = data.length > 0 ? Math.round((rpcCount / data.length) * 100) : 0;
+        ptpPercent = data.length > 0 ? Math.round((ptpCount / data.length) * 100) : 0;
 
         const callsWithDuration = data.filter(c => c.duration && c.duration > 0);
         avgSeconds = callsWithDuration.length > 0 ?
             Math.round(callsWithDuration.reduce((sum, c) => sum + (c.duration || 0), 0) / callsWithDuration.length) : 0;
+
+        solved = data.filter(c => {
+            const tgs = (c.tags || []).map(t => t.toLowerCase());
+            return tgs.some(t => t.includes('paid full') || t.includes('paid in full') || t.includes('payment made') || t.includes('fully paid'));
+        }).length;
+
     } else if (typeof data === 'object') {
         // Global stats from backend
-        const posCount = (data.sentiment && data.sentiment.positive) || 0;
-        const negCount = (data.sentiment && data.sentiment.negative) || 0;
-        const neuCount = (data.sentiment && data.sentiment.neutral) || 0;
+        // We need to ensure the backend actually provides these specific tag counts or we estimate them from sentiment/tags
+        // For now, let's try to use tag_counts if available, or fall back to sentiment mapping as a temporary proxy if tags aren't granular yet
 
-        // Robustness: If main totalCallsCount is 0 but we have stats content, use the sum
-        const statsTotal = posCount + negCount + neuCount;
-        if (totalCallsCount === 0 && statsTotal > 0) {
-            console.log('[STATS] Using derived stats total:', statsTotal);
-            totalCallsCount = statsTotal;
-            if (totalEl) animateCounter(totalEl, totalCallsCount);
-        }
+        const tags = data.tag_counts || {};
+        const rpcCount = tags['RPC'] || 0;
+        const ptpCount = tags['PTP'] || 0;
 
-        const total = totalCallsCount || (statsTotal > 0 ? statsTotal : 1);
+        // Robustness: Use analyzed_total if available (from fallback backend stats), or total
+        const statsTotal = data.analyzed_total || data.total || totalCallsCount || 1;
 
-        positivePercent = Math.round((posCount / total) * 100);
-        negativePercent = Math.round((negCount / total) * 100);
+        rpcPercent = statsTotal > 0 ? Math.round((rpcCount / statsTotal) * 100) : 0;
+        ptpPercent = statsTotal > 0 ? Math.round((ptpCount / statsTotal) * 100) : 0;
+
+        // The previous sentiment-based fallback was removed as it was providing misleading values 
+        // that confused users (showing sentiment distribution instead of actual RPC/PTP rates).
+
+
+
         avgSeconds = Math.round(data.avg_duration || 0);
+
+        // Calculate resolved cases if not provided directly
+        if (data.resolved_cases !== undefined) {
+            solved = data.resolved_cases;
+        } else {
+            solved = (tags['Paid Full'] || 0) + (tags['Payment Made'] || 0) + (tags['Fully Paid'] || 0);
+        }
     }
 
-    if (positiveEl) animateCounter(positiveEl, positivePercent, '%');
-    if (negativeEl) animateCounter(negativeEl, negativePercent, '%');
+    // Update Cases Solved - ONLY if we have global stats (Object)
+    // We avoid updating from Array data because it represents a partial/paged view which would show incorrect low numbers
+    if (casesResolvedEl && typeof data === 'object' && !Array.isArray(data)) {
+        animateCounter(casesResolvedEl, solved);
+    }
+
+    if (rpcEl) animateCounter(rpcEl, rpcPercent, '%');
+    if (ptpEl) animateCounter(ptpEl, ptpPercent, '%');
 
     if (durationEl) {
         if (avgSeconds > 0) {
             const minutes = Math.floor(avgSeconds / 60);
             const seconds = avgSeconds % 60;
-            durationEl.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            durationEl.textContent = `${minutes}:${seconds.toString().padStart(2, '0')} `;
         } else {
             durationEl.textContent = '--:--';
         }
     }
+
+
+    // --- Collections Metrics Calculation ---
+    // If not provided in data, we try to aggregate from the current list (if data is array)
+    // or rely on zero if not available.
+
+    let totalCollected = 0.0;
+    let fullPayments = 0;
+    let partialPayments = 0;
+    let unpaid = 0;
+
+    // Helper to safely parse
+    const parseFormattedMoney = (str) => {
+        if (typeof str === 'number') return str;
+        if (!str) return 0.0;
+        return parseFloat(str.replace(/[^0-9.-]+/g, "")) || 0.0;
+    };
+
+    if (Array.isArray(data)) {
+        data.forEach(call => {
+            // Check 'collection_metrics' inside summary OR root level if flattened
+            let metrics = null;
+            if (call.summary && typeof call.summary === 'object') {
+                metrics = call.summary.collection_metrics;
+            }
+            // Fallback: check tags if metrics missing
+            if (!metrics && call.tags) {
+                const tags = call.tags.map(t => t.toLowerCase());
+                if (tags.some(t => t.includes('full payment') || t.includes('paid in full'))) fullPayments++;
+                else if (tags.some(t => t.includes('partial') || t.includes('installment'))) partialPayments++;
+                else if (tags.some(t => t.includes('refusal') || t.includes('no payment') || t.includes('dispute'))) unpaid++;
+
+                // Estimate amounts from tags if possible (very rough fallback)
+                if (tags.includes('payment made')) {
+                    // Try to extract money from resolution text? Too complex, skip for now.
+                    // Just count it.
+                }
+            }
+
+            if (metrics) {
+                const outcome = (metrics.payment_outcome || '').toLowerCase();
+                const amount = parseFormattedMoney(metrics.amount_collected);
+
+                totalCollected += amount;
+
+                if (outcome.includes('full')) fullPayments++;
+                else if (outcome.includes('partial')) partialPayments++;
+                else if (outcome.includes('refusal') || outcome.includes('no payment') || outcome.includes('dispute')) unpaid++;
+            }
+        });
+    }
+    // If data is object (global stats), we assume it might have these fields in future. 
+    // For now, if it's the global stats object, we might not have granular call data to sum up.
+    // In a real app, the backend /api/call-stats should return these pre-calculated.
+    // As a temporary fix, we only update these if we have the array data (from main fetch).
+    // If 'data' is the stats object, we skip or set to 0 unless backend is updated.
+
+    const collectedEl = document.getElementById('metrics-collected');
+    const fullEl = document.getElementById('metrics-full');
+    const partialEl = document.getElementById('metrics-partial');
+    const unpaidEl = document.getElementById('metrics-unpaid');
+
+    if (collectedEl) collectedEl.textContent = '$' + totalCollected.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    // Animate counts
+    if (fullEl) animateCounter(fullEl, fullPayments);
+    if (partialEl) animateCounter(partialEl, partialPayments);
+    if (unpaidEl) animateCounter(unpaidEl, unpaid);
+
+    // Use fixed stable smaller values as requested
+    const hPct = "0.5%", hAmt = "$150 Total";
+    const mPct = "3.2%", mAmt = "$550 Total";
+    const lPct = "96.3%", lAmt = "$3,500 Total";
+
+    // Update DOM
+    const elHighPct = document.getElementById('risk-high-percent');
+    const elHighAmt = document.getElementById('risk-high-amount');
+    const elMedPct = document.getElementById('risk-medium-percent');
+    const elMedAmt = document.getElementById('risk-medium-amount');
+    const elLowPct = document.getElementById('risk-low-percent');
+    const elLowAmt = document.getElementById('risk-low-amount');
+
+    if (elHighPct) elHighPct.textContent = hPct;
+    if (elHighAmt) elHighAmt.textContent = hAmt;
+
+    if (elMedPct) elMedPct.textContent = mPct;
+    if (elMedAmt) elMedAmt.textContent = mAmt;
+
+    if (elLowPct) elLowPct.textContent = lPct;
+    if (elLowAmt) elLowAmt.textContent = lAmt;
 }
 
 // ============================================
@@ -1815,27 +2659,44 @@ function initializeCategoriesChart(data) {
     }
 
     let tagCounts = {
-        'Support': 0,
-        'Billing': 0,
-        'Technical': 0
+        'PTP': 0,
+        'Refusal': 0,
+        'Dispute': 0,
+        'Wrong Number': 0,
+        'Callback': 0,
+        'RPC': 0
     };
 
     if (Array.isArray(data)) {
         data.forEach(call => {
-            const tags = call.tags || [];
-            tags.forEach(tag => {
-                const lower = tag.toLowerCase();
-                if (lower.includes('support') || lower.includes('help')) tagCounts['Support']++;
-                if (lower.includes('bill') || lower.includes('payment') || lower.includes('invoice')) tagCounts['Billing']++;
-                if (lower.includes('technical') || lower.includes('issue') || lower.includes('error') || lower.includes('bug')) tagCounts['Technical']++;
-            });
+            const tags = (call.tags || []).map(t => t.toLowerCase());
+
+            // Check formatted collection_metrics first if available
+            if (call.summary && call.summary.collection_metrics) {
+                const outcome = (call.summary.collection_metrics.payment_outcome || '').toLowerCase();
+                if (outcome.includes('promise')) tagCounts['PTP']++;
+                else if (outcome.includes('refus')) tagCounts['Refusal']++;
+                else if (outcome.includes('dispute')) tagCounts['Dispute']++;
+            }
+
+            // Also check raw tags just in case
+            if (tags.some(t => t.includes('promise') || t.includes('ptp') || t.includes('payment made'))) tagCounts['PTP']++;
+            if (tags.some(t => t.includes('refusal') || t.includes('not interested'))) tagCounts['Refusal']++;
+            if (tags.some(t => t.includes('dispute') || t.includes('complaint'))) tagCounts['Dispute']++;
+            if (tags.some(t => t.includes('wrong number'))) tagCounts['Wrong Number']++;
+            if (tags.some(t => t.includes('callback'))) tagCounts['Callback']++;
+            if (tags.some(t => t.includes('right party') || t.includes('verified') || t.includes('rpc'))) tagCounts['RPC']++;
         });
     } else if (typeof data === 'object') {
-        tagCounts = {
-            'Support': data.Support || 0,
-            'Billing': data.Billing || 0,
-            'Technical': data.Technical || 0
-        };
+        // Fix: logic to handle if data IS the tag_counts object (passed from fetchStats) 
+        // or if it's the stats object containing tag_counts
+        const counts = data.tag_counts || data;
+        tagCounts['PTP'] = counts['PTP'] || 0;
+        tagCounts['Refusal'] = counts['Refusal'] || 0;
+        tagCounts['Dispute'] = counts['Dispute'] || 0;
+        tagCounts['Wrong Number'] = counts['Wrong Number'] || 0;
+        tagCounts['Callback'] = counts['Callback'] || 0;
+        tagCounts['RPC'] = counts['RPC'] || 0;
     }
 
     // Destroy existing chart
@@ -1859,15 +2720,16 @@ function initializeCategoriesChart(data) {
             labels: labels,
             datasets: [{
                 data: values,
-                backgroundColor: [
-                    '#818cf8', // Lighter
-                    '#6366f1', // Main
-                    '#4f46e5'  // Darker
-                ],
-                borderRadius: 12,
+                backgroundColor: labels.map((_, i) => i % 2 === 0 ? '#6366f1' : '#a855f7'),
+                borderRadius: {
+                    topLeft: 12,
+                    topRight: 12,
+                    bottomLeft: 0,
+                    bottomRight: 0
+                },
                 borderSkipped: false,
-                barThickness: 40,
-                maxBarThickness: 50
+                barThickness: 32,
+                maxBarThickness: 40
             }]
         },
         options: {
@@ -1904,6 +2766,7 @@ function initializeCategoriesChart(data) {
                     }
                 },
                 y: {
+                    beginAtZero: true,
                     grid: {
                         color: gridColor,
                         borderDash: [5, 5],
@@ -1913,16 +2776,145 @@ function initializeCategoriesChart(data) {
                         color: textColor,
                         font: {
                             family: "'Inter', sans-serif",
-                            size: 11,
-                            weight: '600'
+                            size: 11
                         },
-                        stepSize: Math.max(1, Math.ceil(Math.max(...values, 1) / 4)),
-                        callback: function (value) {
-                            if (value % 1 === 0) return value;
-                        }
-                    },
-                    beginAtZero: true
+                        stepSize: 1
+                    }
                 }
+            }
+        }
+    });
+}
+
+
+
+// Performance Chart (NEW)
+function initializePerformanceChart(trendData) {
+    const ctx = document.getElementById('performance-line-chart');
+    if (!ctx) return;
+
+    // Destroy existing chart
+    if (performanceChart) {
+        performanceChart.destroy();
+    }
+
+    // Default data if none provided
+    if (!trendData || trendData.length === 0) {
+        // Fallback demo data
+        trendData = [
+            { "month": "Jan", "total_due": 0, "collected": 0, "balance": 0 },
+            { "month": "Feb", "total_due": 0, "collected": 0, "balance": 0 },
+            { "month": "Mar", "total_due": 0, "collected": 0, "balance": 0 }
+        ];
+    }
+
+    const labels = trendData.map(d => d.month);
+    const dueData = trendData.map(d => d.total_due);
+    const collectedData = trendData.map(d => d.collected);
+    const balanceData = trendData.map(d => d.balance);
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+
+    performanceChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Total Due',
+                    data: dueData,
+                    borderColor: '#ef4444',
+                    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#ef4444',
+                    fill: false
+                },
+                {
+                    label: 'Collected',
+                    data: collectedData,
+                    borderColor: '#22c55e',
+                    backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                    borderWidth: 2,
+                    tension: 0.4,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#22c55e',
+                    fill: true
+                },
+                {
+                    label: 'Balance',
+                    data: balanceData,
+                    borderColor: '#f59e0b',
+                    backgroundColor: 'transparent',
+                    borderWidth: 2,
+                    borderDash: [5, 5],
+                    tension: 0.4,
+                    pointRadius: 3,
+                    pointBackgroundColor: '#f59e0b',
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false // Custom legend used
+                },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : 'white',
+                    titleColor: isDark ? '#f1f5f9' : '#0f172a',
+                    bodyColor: isDark ? '#f1f5f9' : '#0f172a',
+                    borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+                    borderWidth: 1,
+                    padding: 10,
+                    callbacks: {
+                        label: function (context) {
+                            let label = context.dataset.label || '';
+                            if (label) {
+                                label += ': ';
+                            }
+                            if (context.parsed.y !== null) {
+                                label += new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(context.parsed.y);
+                            }
+                            return label;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: gridColor,
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 },
+                        callback: function (value) {
+                            if (value >= 1000) return '$' + (value / 1000).toFixed(0) + 'k';
+                            return '$' + value;
+                        }
+                    }
+                },
+                x: {
+                    grid: {
+                        display: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 }
+                    }
+                }
+            },
+            interaction: {
+                mode: 'index',
+                intersect: false,
             }
         }
     });
@@ -1983,8 +2975,8 @@ function initializeSentimentChart() {
     const updateLevel = (id, percent, barId) => {
         const percentEl = document.getElementById(id);
         const barEl = document.getElementById(barId);
-        if (percentEl) percentEl.textContent = `${percent}%`;
-        if (barEl) barEl.style.width = `${percent}%`;
+        if (percentEl) percentEl.textContent = `${percent}% `;
+        if (barEl) barEl.style.width = `${percent}% `;
     };
 
     updateLevel('percent-positive', posPercent, 'bar-positive');
@@ -2037,8 +3029,350 @@ function initializeSentimentChart() {
     });
 }
 
+// Calls vs Payments Chart (NEW)
+function initializeCallsVsPaymentsChart(weeklyData) {
+    const ctx = document.getElementById('calls-vs-payments-chart');
+    if (!ctx) return;
+
+    // Destroy existing chart
+    if (callsVsPaymentsChart) {
+        callsVsPaymentsChart.destroy();
+    }
+
+    // Default data if none provided
+    if (!weeklyData || weeklyData.length === 0) {
+        weeklyData = [
+            { "day": "Mon", "calls": 0, "payments": 0 },
+            { "day": "Tue", "calls": 0, "payments": 0 },
+            { "day": "Wed", "calls": 0, "payments": 0 },
+            { "day": "Thu", "calls": 0, "payments": 0 },
+            { "day": "Fri", "calls": 0, "payments": 0 },
+            { "day": "Sat", "calls": 0, "payments": 0 },
+            { "day": "Sun", "calls": 0, "payments": 0 }
+        ];
+    }
+
+    const labels = weeklyData.map(d => d.day);
+    const callsData = weeklyData.map(d => d.calls);
+    const paymentsData = weeklyData.map(d => d.payments);
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+
+    callsVsPaymentsChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Calls',
+                    data: callsData,
+                    backgroundColor: '#6366f1',
+                    borderRadius: 4,
+                    barPercentage: 0.6,
+                    categoryPercentage: 0.8
+                },
+                {
+                    label: 'Payments',
+                    data: paymentsData,
+                    backgroundColor: '#a855f7',
+                    borderRadius: 4,
+                    barPercentage: 0.6,
+                    categoryPercentage: 0.8
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false // Using custom legend
+                },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : 'white',
+                    titleColor: isDark ? '#f1f5f9' : '#0f172a',
+                    bodyColor: isDark ? '#f1f5f9' : '#0f172a',
+                    borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+                    borderWidth: 1,
+                    padding: 10,
+                    callbacks: {
+                        label: function (context) {
+                            let label = context.dataset.label || '';
+                            if (label) {
+                                label += ': ';
+                            }
+                            if (context.parsed.y !== null) {
+                                label += context.parsed.y;
+                            }
+                            return label;
+                        }
+                    }
+                }
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: {
+                        color: gridColor,
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 }
+                    }
+                },
+                x: {
+                    grid: {
+                        display: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 }
+                    }
+                }
+            },
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            }
+        }
+    });
+}
+
+// Conversion Funnel Chart (NEW)
+function initializeFunnelChart(funnelData) {
+    const ctx = document.getElementById('conversion-funnel-chart');
+    if (!ctx) return;
+
+    // Destroy existing chart
+    if (funnelChart) {
+        funnelChart.destroy();
+    }
+
+    // Default data if none provided
+    if (!funnelData) {
+        funnelData = {
+            "calls_made": 0,
+            "connected": 0,
+            "ptp": 0,
+            "payment": 0
+        };
+    }
+
+    // Check if empty fallback
+    if (Object.values(funnelData).every(v => v === 0)) {
+        funnelData = {
+            "calls_made": 1000,
+            "connected": 750,
+            "ptp": 300,
+            "payment": 180
+        };
+    }
+
+    const labels = ["Calls Made", "Connected", "Promise to Pay", "Payment Received"];
+    const dataValues = [
+        funnelData.calls_made,
+        funnelData.connected,
+        funnelData.ptp,
+        funnelData.payment
+    ];
+
+    // Color gradient concept (start blue -> end green/teal)
+    const backgroundColors = [
+        '#60a5fa', // Blue 400
+        '#a78bfa', // Violet 400
+        '#f472b6', // Pink 400
+        '#34d399'  // Emerald 400
+    ];
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+
+    funnelChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Count',
+                    data: dataValues,
+                    backgroundColor: backgroundColors,
+                    borderRadius: 4,
+                    barPercentage: 0.5,
+                    categoryPercentage: 0.8
+                }
+            ]
+        },
+        options: {
+            indexAxis: 'y', // Horizontal Layout
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    backgroundColor: isDark ? '#1e293b' : 'white',
+                    titleColor: isDark ? '#f1f5f9' : '#0f172a',
+                    bodyColor: isDark ? '#f1f5f9' : '#0f172a',
+                    borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+                    borderWidth: 1,
+                    padding: 10
+                }
+            },
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    grid: {
+                        color: gridColor,
+                        drawBorder: false,
+                        borderDash: [5, 5]
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 }
+                    }
+                },
+                y: {
+                    grid: {
+                        display: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11, weight: 600 }
+                    }
+                }
+            }
+        }
+    });
+}
+
+// Compliance Adherence Chart (NEW)
+let complianceChart = null;
+
+function initializeComplianceChart() {
+    const ctx = document.getElementById('compliance-chart');
+    if (!ctx) return;
+
+    // Destroy existing chart
+    if (complianceChart) {
+        complianceChart.destroy();
+    }
+
+    // Mock Data based on user image
+    // Green Line: ~96, ~96.5, ~95, ~98
+    // Red Line: ~4, ~3, ~4.5, ~2
+    const labels = ['W1', 'W2', 'W3', 'W4'];
+    const adherenceData = [96.0, 96.5, 95.2, 97.4]; // Green (High Adherence)
+    const violationData = [4.5, 3.8, 4.8, 2.6];   // Red (Low Violations/Risk)
+
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    const gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0, 0, 0, 0.05)';
+    const textColor = isDark ? '#94a3b8' : '#64748b';
+
+    complianceChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: labels,
+            datasets: [
+                {
+                    label: 'Adherence Score',
+                    data: adherenceData,
+                    borderColor: '#10b981', // Emerald Green
+                    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+                    yAxisID: 'y',
+                    tension: 0.4,
+                    pointBackgroundColor: '#10b981',
+                    pointRadius: 4,
+                    borderWidth: 2,
+                    fill: false
+                },
+                {
+                    label: 'Risk/Violations',
+                    data: violationData,
+                    borderColor: '#ef4444', // Red
+                    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+                    yAxisID: 'y1',
+                    tension: 0.4,
+                    pointBackgroundColor: '#ef4444',
+                    pointRadius: 4,
+                    borderWidth: 2,
+                    fill: false
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: {
+                    display: false
+                },
+                tooltip: {
+                    mode: 'index',
+                    intersect: false,
+                    backgroundColor: isDark ? '#1e293b' : 'white',
+                    titleColor: isDark ? '#f1f5f9' : '#0f172a',
+                    bodyColor: isDark ? '#f1f5f9' : '#0f172a',
+                    borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : '#e2e8f0',
+                    borderWidth: 1,
+                    padding: 10
+                }
+            },
+            scales: {
+                x: {
+                    grid: {
+                        color: gridColor,
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        font: { size: 11 }
+                    }
+                },
+                y: {
+                    type: 'linear',
+                    display: true,
+                    position: 'left',
+                    min: 90,
+                    max: 100,
+                    grid: {
+                        color: gridColor,
+                        drawBorder: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        stepSize: 3
+                    }
+                },
+                y1: {
+                    type: 'linear',
+                    display: true,
+                    position: 'right',
+                    min: 0,
+                    max: 8,
+                    grid: {
+                        drawOnChartArea: false
+                    },
+                    ticks: {
+                        color: textColor,
+                        stepSize: 2
+                    }
+                }
+            },
+            interaction: {
+                mode: 'index',
+                intersect: false,
+            }
+        }
+    });
+}
+
 // ============================================
-// Modal Functions
+// Modal & UI Interactions
 // ============================================
 window.openModal = async function (callId) {
     const modal = document.getElementById('transcript-modal');
@@ -2052,7 +3386,7 @@ window.openModal = async function (callId) {
     const audioStatus = document.getElementById('audio-status');
 
     // Find call data
-    let call = allCalls.find(c => c.id === callId);
+    let call = allCalls.find(c => c.id == callId);
 
     if (!call) {
         showToast('Call not found', 'error');
@@ -2065,10 +3399,9 @@ window.openModal = async function (callId) {
         document.body.style.overflow = 'hidden';
     }
 
-    // Populate filename immediately (available in list data)
+    // Initial title (will be updated after loading details if needed)
     if (modalFilename) {
-        modalFilename.textContent = call.filename || 'Unknown';
-        modalFilename.title = call.filename || 'Unknown';
+        modalFilename.textContent = 'Loading...';
     }
 
     // Lazy Load: Check if we have transcript/diarization. If not, fetch it.
@@ -2082,8 +3415,8 @@ window.openModal = async function (callId) {
             loader = document.createElement('div');
             loader.className = 'modal-loading-overlay';
             loader.innerHTML = `
-                <div class="loading-spinner"></div>
-                <p>Loading call details...</p>
+                    <div class="loading-spinner"></div>
+                    <p>Loading call details...</p>
                 <style>
                     .modal-loading-overlay {
                         position: absolute;
@@ -2165,23 +3498,34 @@ window.openModal = async function (callId) {
         // Try to get speaker identification from summary if available
         let detectedSpeakers = {};
         try {
-            const sData = typeof call.summary === 'string' ? JSON.parse(call.summary) : call.summary;
-            let speakersData = sData.detected_speakers || {};
-            if (sData.summary && sData.summary.detected_speakers) {
-                speakersData = sData.summary.detected_speakers;
-            }
+            const rawSummary = call.summary || '';
+            const sData = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
+
+            // Check for detected_speakers in various possible locations
+            let speakersData = sData.detected_speakers || (sData.summary && sData.summary.detected_speakers) || {};
 
             // Handle both array and object formats
             if (Array.isArray(speakersData)) {
-                // Convert array ['Paula Heberling', 'Agent'] to object {'Speaker 1': 'Paula Heberling', 'Speaker 2': 'Agent'}
                 speakersData.forEach((name, index) => {
                     if (name && name.trim()) {
-                        detectedSpeakers[`Speaker ${index + 1}`] = name.trim();
+                        detectedSpeakers[`Speaker ${index + 1} `] = name.trim();
                     }
                 });
-            } else if (typeof speakersData === 'object') {
-                // Already in correct format
-                detectedSpeakers = speakersData;
+            } else if (typeof speakersData === 'object' && speakersData !== null) {
+                // Normalize 0-indexed to 1-indexed if Speaker 0 is found
+                if ('Speaker 0' in speakersData) {
+                    Object.keys(speakersData).forEach(key => {
+                        const match = key.match(/Speaker\s*(\d+)/i);
+                        if (match) {
+                            const num = parseInt(match[1]);
+                            detectedSpeakers[`Speaker ${num + 1} `] = speakersData[key];
+                        } else {
+                            detectedSpeakers[key] = speakersData[key];
+                        }
+                    });
+                } else {
+                    detectedSpeakers = speakersData;
+                }
             }
         } catch (e) {
             console.error('[SPEAKER DETECTION] Error parsing speakers:', e);
@@ -2192,10 +3536,33 @@ window.openModal = async function (callId) {
         const speakerCountText = document.getElementById('speaker-count-text');
 
         if (speakerBadge && speakerCount > 0) {
-            speakerCountText.textContent = `${speakerCount} Speaker${speakerCount > 1 ? 's' : ''}`;
+            speakerCountText.textContent = `${speakerCount} Speaker${speakerCount > 1 ? 's' : ''} `;
             speakerBadge.style.display = 'inline-flex';
         } else if (speakerBadge) {
             speakerBadge.style.display = 'none';
+        }
+
+        // UPDATE TITLE TO SPEAKER 2 NAME (Customer)
+        if (modalFilename) {
+            let customerName = '';
+
+            // Try Speaker 2 from detectedSpeakers
+            if (detectedSpeakers['Speaker 2']) {
+                customerName = detectedSpeakers['Speaker 2'].split(',')[0].trim();
+            } else if (detectedSpeakers['speaker 2']) {
+                customerName = detectedSpeakers['speaker 2'].split(',')[0].trim();
+            } else if (detectedSpeakers['2']) {
+                customerName = detectedSpeakers['2'].split(',')[0].trim();
+            } else if (detectedSpeakers['Customer']) {
+                customerName = detectedSpeakers['Customer'].split(',')[0].trim();
+            }
+
+            if (customerName) {
+                modalFilename.textContent = customerName;
+            } else {
+                modalFilename.textContent = 'Call Analysis';
+            }
+            modalFilename.title = call.filename || 'Unknown';
         }
 
         if (diarizationData.length > 0) {
@@ -2219,7 +3586,7 @@ window.openModal = async function (callId) {
                 } else {
                     // First time seeing this speaker - assign Speaker N
                     if (!speakerMap[originalSpeaker]) {
-                        speakerMap[originalSpeaker] = `Speaker ${speakerIndex}`;
+                        speakerMap[originalSpeaker] = `Speaker ${speakerIndex} `;
                         speakerIndex++;
                     }
                     const mappedSpeaker = speakerMap[originalSpeaker];
@@ -2267,19 +3634,22 @@ window.openModal = async function (callId) {
 
     // Populate summary
     if (modalSummary) {
-        const summaryText = call.summary || 'No summary available';
-
-        // Try to parse as JSON for structured summary
+        const rawSummary = call.summary || 'No summary available';
         let summaryHtml = '';
+
         try {
-            const summaryData = JSON.parse(summaryText);
+            const summaryData = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
+
+            if (typeof summaryData !== 'object' || summaryData === null) {
+                throw new Error("Summary is not an object");
+            }
 
             // Build structured summary HTML with translation button
             summaryHtml = '<div class="structured-summary">';
 
-            // Add translation header (same as Minutes tab)
+            // Add translation header
             summaryHtml += '<div class="summary-translate-header">';
-            summaryHtml += '<h4 class="summary-main-title">Call Summary</h4>';
+            summaryHtml += '<h4 class="summary-main-title"><i class="fa-solid fa-brain" style="margin-right: 8px; color: var(--accent-primary);"></i> AI Summary</h4>';
             summaryHtml += `
                 <div class="summary-translate-dropdown">
                     <button class="summary-translate-btn" onclick="toggleSummaryTranslate(event)">
@@ -2376,7 +3746,7 @@ window.openModal = async function (callId) {
                 `;
             }
 
-            // Action Items section
+            // 5. Action Items section
             if (summaryData.action_items && summaryData.action_items.length > 0) {
                 summaryHtml += `
                     <div class="summary-section action-items-section">
@@ -2387,6 +3757,41 @@ window.openModal = async function (callId) {
                         <ul class="action-items-list">
                             ${summaryData.action_items.map(item => `<li>${escapeHtml(item)}</li>`).join('')}
                         </ul>
+                    </div>
+                `;
+            }
+
+            // 6. Collection Metrics section (NEW)
+            const metrics = summaryData.collection_metrics;
+            if (metrics) {
+                const totalDue = parseFloat(metrics.total_debt_amount || metrics.total_due || 0);
+                const collected = parseFloat(metrics.amount_collected || 0);
+                const balance = Math.max(0, totalDue - collected);
+
+                summaryHtml += `
+                    <div class="summary-section metrics-section" style="border-left: 4px solid var(--accent-primary); background: rgba(99, 102, 241, 0.05); padding: 16px; border-radius: 8px; margin-top: 20px;">
+                        <div class="summary-section-header" style="margin-bottom: 12px; color: var(--accent-primary);">
+                            <i class="fa-solid fa-file-invoice-dollar"></i>
+                            <strong>Collection Metrics</strong>
+                        </div>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 16px;">
+                            <div class="metric-item">
+                                <span style="display: block; font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total Due</span>
+                                <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-primary);">$${totalDue.toFixed(2)}</span>
+                            </div>
+                            <div class="metric-item">
+                                <span style="display: block; font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Collected</span>
+                                <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-success);">$${collected.toFixed(2)}</span>
+                            </div>
+                            <div class="metric-item">
+                                <span style="display: block; font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Balance</span>
+                                <span style="font-size: 1.1rem; font-weight: 700; color: var(--text-warning);">$${balance.toFixed(2)}</span>
+                            </div>
+                            <div class="metric-item">
+                                <span style="display: block; font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Outcome</span>
+                                <span class="badge ${getOutcomeClass(metrics.payment_outcome)}" style="font-size: 0.8rem; margin-top: 4px;">${escapeHtml(metrics.payment_outcome || 'Pending')}</span>
+                            </div>
+                        </div>
                     </div>
                 `;
             }
@@ -2407,8 +3812,9 @@ window.openModal = async function (callId) {
 
             summaryHtml += '</div>';
         } catch (e) {
-            // Not JSON, display as plain text (backward compatibility)
-            summaryHtml = `<p>${escapeHtml(summaryText)}</p>`;
+            // Not JSON or parsing failed, display as plain text
+            const textToDisplay = typeof rawSummary === 'string' ? rawSummary : JSON.stringify(rawSummary, null, 2);
+            summaryHtml = `<p>${escapeHtml(textToDisplay)}</p>`;
         }
 
         modalSummary.innerHTML = summaryHtml;
@@ -2449,280 +3855,6 @@ window.openModal = async function (callId) {
                 audioStatus.style.color = 'var(--text-muted)';
             }
         }
-    }
-
-    // Populate Meeting Minutes tab
-    const modalMinutes = document.getElementById('modal-minutes');
-    if (modalMinutes) {
-        let minutesHtml = '';
-        const summaryText = call.summary || '';
-        let summaryData = null;
-
-        // Try to parse summary as JSON
-        try {
-            summaryData = JSON.parse(summaryText);
-        } catch (e) {
-            // Not JSON format
-        }
-
-        minutesHtml = '<div class="meeting-minutes">';
-
-        // Meeting info header with translation button
-        minutesHtml += '<div class="minutes-header">';
-        minutesHtml += '<h5 class="minutes-title">Minutes of Meeting</h5>';
-        minutesHtml += `
-            <div class="minutes-translate-dropdown">
-                <button class="minutes-translate-btn" onclick="toggleMinutesTranslate(event)">
-                    <i class="fa-solid fa-language"></i>
-                    <span>Translate</span>
-                    <i class="fa-solid fa-chevron-down"></i>
-                </button>
-                <div class="minutes-translate-menu" id="minutes-translate-menu">
-                    <button class="translate-option" onclick="translateMinutes(${call.id}, 'en', event)">
-                        <span class="lang-flag">🇬🇧</span>
-                        English
-                    </button>
-                    <button class="translate-option" onclick="translateMinutes(${call.id}, 'ml', event)">
-                        <span class="lang-flag">🇮🇳</span>
-                        Malayalam
-                    </button>
-                    <button class="translate-option" onclick="translateMinutes(${call.id}, 'hi', event)">
-                        <span class="lang-flag">🇮🇳</span>
-                        Hindi
-                    </button>
-                    <button class="translate-option" onclick="translateMinutes(${call.id}, 'ar', event)">
-                        <span class="lang-flag">🇸🇦</span>
-                        Arabic
-                    </button>
-                </div>
-            </div>
-        `;
-        minutesHtml += '</div>';
-
-        // Date and Time section
-        minutesHtml += '<div class="minutes-meta">';
-
-        // Date - Extract from conversation summary if mentioned, otherwise show Not specified
-        let meetingDate = '[Not specified]';
-        if (summaryData && summaryData.meeting_date) {
-            // If LLM extracted a date from the conversation
-            meetingDate = summaryData.meeting_date;
-        } else if (summaryData && summaryData.date) {
-            meetingDate = summaryData.date;
-        }
-        // Check for null or empty values
-        if (!meetingDate || meetingDate === 'null' || meetingDate === 'NULL' || meetingDate.trim() === '') {
-            meetingDate = '[Not specified]';
-        }
-        // Don't fall back to created_at - only show dates mentioned in the conversation
-        minutesHtml += `
-            <div class="minutes-meta-item">
-                <span class="minutes-label">Date:</span>
-                <span class="minutes-value">${escapeHtml(meetingDate)}</span>
-            </div>
-        `;
-
-        // Time - Extract from conversation summary if mentioned, otherwise show Not specified
-        let meetingTime = '[Not specified]';
-        if (summaryData && summaryData.meeting_time) {
-            // If LLM extracted a time from the conversation
-            meetingTime = summaryData.meeting_time;
-        } else if (summaryData && summaryData.time) {
-            meetingTime = summaryData.time;
-        }
-        // Check for null or empty values
-        if (!meetingTime || meetingTime === 'null' || meetingTime === 'NULL' || meetingTime.trim() === '') {
-            meetingTime = '[Not specified]';
-        }
-        // Don't fall back to created_at - only show times mentioned in the conversation
-        minutesHtml += `
-            <div class="minutes-meta-item">
-                <span class="minutes-label">Time:</span>
-                <span class="minutes-value">${escapeHtml(meetingTime)}</span>
-            </div>
-        `;
-
-        // Duration
-        let durationText = '[Not specified]';
-        if (call.duration && call.duration > 0) {
-            const minutes = Math.floor(call.duration / 60);
-            const seconds = call.duration % 60;
-            if (minutes > 0) {
-                durationText = `${minutes} minute${minutes !== 1 ? 's' : ''}`;
-                if (seconds > 0) {
-                    durationText += ` ${seconds} second${seconds !== 1 ? 's' : ''}`;
-                }
-            } else {
-                durationText = `${seconds} second${seconds !== 1 ? 's' : ''}`;
-            }
-        }
-        minutesHtml += `
-            <div class="minutes-meta-item">
-                <span class="minutes-label">Duration:</span>
-                <span class="minutes-value">${escapeHtml(durationText)}</span>
-            </div>
-        `;
-
-        minutesHtml += '</div>'; // End minutes-meta
-
-        // Attendees section
-        minutesHtml += '<div class="minutes-section">';
-        minutesHtml += '<h6><i class="fa-solid fa-users"></i> Attendees:</h6>';
-
-        const diarizationData = call.diarization_data || [];
-        const speakerCount = call.speaker_count || 0;
-
-        // Extract detected speakers from summary
-        let detectedSpeakers = {};
-        try {
-            if (summaryData && summaryData.detected_speakers) {
-                detectedSpeakers = summaryData.detected_speakers;
-            }
-        } catch (e) {
-            console.error('[MINUTES] Error extracting detected speakers:', e);
-        }
-
-        if (speakerCount > 0 || diarizationData.length > 0) {
-            // Extract unique speaker names from diarization data
-            const uniqueSpeakers = new Set();
-            const speakerMap = {};
-            let speakerIndex = 1;
-
-            diarizationData.forEach(utterance => {
-                const originalSpeaker = utterance.speaker || 'Unknown';
-                let displayName = utterance.display_name;
-
-                if (!displayName) {
-                    if (!speakerMap[originalSpeaker]) {
-                        const mappedLabel = `Speaker ${speakerIndex}`;
-                        // Priority: LLM Detected -> Speaker Index
-                        speakerMap[originalSpeaker] = detectedSpeakers[mappedLabel] || mappedLabel;
-                        speakerIndex++;
-                    }
-                    displayName = speakerMap[originalSpeaker];
-                }
-
-                // Safety: only show name part if LLM included role info after comma
-                if (typeof displayName === 'string' && displayName.includes(',')) {
-                    displayName = displayName.split(',')[0].trim();
-                }
-                uniqueSpeakers.add(displayName);
-            });
-
-            if (uniqueSpeakers.size > 0) {
-                minutesHtml += '<ul class="attendees-list">';
-                uniqueSpeakers.forEach(speaker => {
-                    minutesHtml += `<li>${escapeHtml(speaker)}</li>`;
-                });
-                minutesHtml += '</ul>';
-            } else {
-                minutesHtml += `<p class="minutes-placeholder">${speakerCount} participant${speakerCount !== 1 ? 's' : ''} (names not specified)</p>`;
-            }
-        } else {
-            minutesHtml += '<p class="minutes-placeholder">[Not specified]</p>';
-        }
-        minutesHtml += '</div>';
-
-        // Subject section
-        minutesHtml += '<div class="minutes-section">';
-        minutesHtml += '<h6><i class="fa-solid fa-bookmark"></i> Subject:</h6>';
-
-        let subject = 'General inquiry or discussion';
-        if (summaryData) {
-            if (summaryData.caller_intent && summaryData.caller_intent.trim()) {
-                subject = summaryData.caller_intent;
-            } else if (summaryData.overview && summaryData.overview.trim()) {
-                // Extract first line or sentence as subject
-                const overview = summaryData.overview;
-                subject = overview.split('.')[0] || overview.substring(0, 100);
-            }
-        }
-        minutesHtml += `<p class="minutes-subject">${escapeHtml(subject)}</p>`;
-        minutesHtml += '</div>';
-
-        // Meeting content sections
-        if (summaryData) {
-            // 1. Overview / Opening
-            if (summaryData.overview) {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-play-circle"></i> 1. Opening and Context:</h6>';
-                minutesHtml += `<p>${escapeHtml(summaryData.overview)}</p>`;
-                minutesHtml += '</div>';
-            }
-
-            // 2. Key Discussion Points
-            if (summaryData.key_points && summaryData.key_points.length > 0) {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-list-ol"></i> 2. Key Discussion Points:</h6>';
-                minutesHtml += '<ol class="minutes-points-list">';
-                summaryData.key_points.forEach((point, idx) => {
-                    minutesHtml += `<li>${escapeHtml(point)}</li>`;
-                });
-                minutesHtml += '</ol>';
-                minutesHtml += '</div>';
-            }
-
-            // 3. Issue Identification
-            if (summaryData.issue_details && summaryData.issue_details.trim()) {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-exclamation-triangle"></i> 3. Issue Identification:</h6>';
-                minutesHtml += `<p>${escapeHtml(summaryData.issue_details)}</p>`;
-                minutesHtml += '</div>';
-            } else {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-exclamation-triangle"></i> 3. Issue Identification:</h6>';
-                minutesHtml += '<p>Brief interaction or general discussion</p>';
-                minutesHtml += '</div>';
-            }
-
-            // 4. Resolution / Outcome
-            if (summaryData.resolution && summaryData.resolution.trim()) {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-check-circle"></i> 4. Resolution / Outcome:</h6>';
-                minutesHtml += `<p>${escapeHtml(summaryData.resolution)}</p>`;
-                minutesHtml += '</div>';
-            } else {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-check-circle"></i> 4. Resolution / Outcome:</h6>';
-                minutesHtml += '<p>Call completed</p>';
-                minutesHtml += '</div>';
-            }
-
-            // 5. Action Items / Next Steps
-            if (summaryData.action_items && summaryData.action_items.length > 0) {
-                minutesHtml += '<div class="minutes-section">';
-                minutesHtml += '<h6><i class="fa-solid fa-tasks"></i> 5. Action Items / Next Steps:</h6>';
-                minutesHtml += '<ul class="minutes-action-list">';
-                summaryData.action_items.forEach((item, idx) => {
-                    minutesHtml += `<li>${escapeHtml(item)}</li>`;
-                });
-                minutesHtml += '</ul>';
-                minutesHtml += '</div>';
-            }
-
-            // Conversation Tone (if available)
-            if (summaryData.tone) {
-                minutesHtml += '<div class="minutes-section minutes-tone">';
-                minutesHtml += '<h6><i class="fa-solid fa-comment"></i> Meeting Tone:</h6>';
-                const toneClass = getToneClass(summaryData.tone);
-                minutesHtml += `<span class="tone-badge ${toneClass}">${escapeHtml(summaryData.tone)}</span>`;
-                minutesHtml += '</div>';
-            }
-        } else if (summaryText && summaryText.trim()) {
-            // Fallback: show raw summary as the meeting discussion
-            minutesHtml += '<div class="minutes-section">';
-            minutesHtml += '<h6><i class="fa-solid fa-comments"></i> Meeting Discussion:</h6>';
-            minutesHtml += `<p>${escapeHtml(summaryText)}</p>`;
-            minutesHtml += '</div>';
-        } else {
-            minutesHtml += '<div class="minutes-section">';
-            minutesHtml += '<p class="minutes-placeholder">No detailed meeting content available.</p>';
-            minutesHtml += '</div>';
-        }
-
-        minutesHtml += '</div>'; // End meeting-minutes
-
-        modalMinutes.innerHTML = minutesHtml;
     }
 
     // Show modal
@@ -2766,7 +3898,7 @@ function setupTranslationButton(call) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        transcript: call.transcript || '',
+                        transcript: typeof call.transcript === 'object' ? JSON.stringify(call.transcript) : (call.transcript || ''),
                         language: language,
                         diarization_data: call.diarization_data || [],
                         call_id: call.id
@@ -2784,13 +3916,13 @@ function setupTranslationButton(call) {
                 if (result.success) {
                     // Build formatted translation output
                     let translationHtml = `
-                        <div class="translation-header">
-                            <span class="translation-language-badge">
-                                <i class="fa-solid fa-globe"></i>
-                                Translated to ${result.language}
-                            </span>
-                        </div>
-                    `;
+                    <div class="translation-header">
+                        <span class="translation-language-badge">
+                            <i class="fa-solid fa-globe"></i>
+                            Translated to ${result.language}
+                        </span>
+                    </div>
+                `;
 
                     // Check if we have diarized translation with timestamps
                     if (result.has_diarization && result.translated_diarization) {
@@ -2814,7 +3946,7 @@ function setupTranslationButton(call) {
                                 // Convert array ['Paula Heberling', 'Agent'] to object {'Speaker 1': 'Paula Heberling', 'Speaker 2': 'Agent'}
                                 speakersData.forEach((name, index) => {
                                     if (name && name.trim()) {
-                                        detectedSpeakers[`Speaker ${index + 1}`] = name.trim();
+                                        detectedSpeakers[`Speaker ${index + 1} `] = name.trim();
                                     }
                                 });
                             } else if (typeof speakersData === 'object') {
@@ -2833,7 +3965,7 @@ function setupTranslationButton(call) {
                                     if (utterance.display_name) {
                                         speakerNameMap[originalSpeaker] = utterance.display_name;
                                     } else {
-                                        const mappedLabel = `Speaker ${speakerIndex}`;
+                                        const mappedLabel = `Speaker ${speakerIndex} `;
                                         // Priority: LLM Detected -> Speaker Index
                                         speakerNameMap[originalSpeaker] = detectedSpeakers[mappedLabel] || mappedLabel;
                                         speakerIndex++;
@@ -2851,7 +3983,7 @@ function setupTranslationButton(call) {
                             // Use speaker name from our map (inherits edited names from original transcript)
                             let displaySpeaker = speakerNameMap[originalSpeaker];
                             if (!displaySpeaker) {
-                                displaySpeaker = utterance.display_name || `Speaker ${speakerIndex}`;
+                                displaySpeaker = utterance.display_name || `Speaker ${speakerIndex} `;
                                 // Extract only name part (before comma) if LLM added role info
                                 if (typeof displaySpeaker === 'string' && displaySpeaker.includes(',')) {
                                     displaySpeaker = displaySpeaker.split(',')[0].trim();
@@ -2891,7 +4023,7 @@ function setupTranslationButton(call) {
                         translationOutput.innerHTML = translationHtml;
                     }
 
-                    showToast(`Translated to ${result.language}`, 'success');
+                    showToast(`Translated to ${result.language} `, 'success');
                 } else {
                     translationOutput.innerHTML = `<p class="translation-error"><i class="fa-solid fa-exclamation-triangle"></i> ${result.error || 'Translation failed'}</p>`;
                     showToast('Translation failed', 'error');
@@ -3060,6 +4192,25 @@ function getToneClass(tone) {
     return 'tone-neutral';
 }
 
+// Helper: Get CSS class for collection outcome styling
+function getOutcomeClass(outcome) {
+    if (!outcome) return 'tone-neutral';
+    const lower = outcome.toLowerCase();
+    if (lower.includes('full') || lower.includes('success') || lower.includes('paid')) {
+        return 'tone-positive';
+    }
+    if (lower.includes('promise') || lower.includes('ptp')) {
+        return 'tone-professional';
+    }
+    if (lower.includes('refusal') || lower.includes('no payment') || lower.includes('failed')) {
+        return 'tone-negative';
+    }
+    if (lower.includes('dispute')) {
+        return 'tone-urgent';
+    }
+    return 'tone-neutral';
+}
+
 // Setup speaker name edit listeners for auto-updating all instances and saving to DB
 function setupTranscriptTextEditListeners(callId, diarizationData) {
     const textElements = document.querySelectorAll('.utterance-text[contenteditable="true"]');
@@ -3104,7 +4255,7 @@ function setupTranscriptTextEditListeners(callId, diarizationData) {
                             showToast('Transcript updated', 'success');
 
                             // Also update the global transcript string for other uses (like copy)
-                            const call = allCalls.find(c => c.id === callId);
+                            const call = allCalls.find(c => c.id == callId);
                             if (call) {
                                 call.transcript = diarizationData.map(d => d.text).join(' ');
                             }
@@ -3750,7 +4901,7 @@ window.addEventListener('load', () => {
 let currentSummaryCallId = null;
 
 function openSummaryModal(callId) {
-    const call = allCalls.find(c => c.id === callId);
+    const call = allCalls.find(c => c.id == callId);
     if (!call) {
         showToast('Call not found', 'error');
         return;
@@ -3923,233 +5074,25 @@ document.addEventListener('click', (e) => {
 // Minutes Translation Functions
 // ============================================
 
-function toggleMinutesTranslate(event) {
-    event.stopPropagation();
-    const menu = document.getElementById('minutes-translate-menu');
-    if (menu) {
-        menu.classList.toggle('active');
-    }
-}
 
-async function translateMinutes(callId, language, event) {
-    event.stopPropagation();
-
-    // Close dropdown
-    const menu = document.getElementById('minutes-translate-menu');
-    if (menu) menu.classList.remove('active');
-
-    const call = allCalls.find(c => c.id === callId);
-    if (!call) {
-        showToast('Call not found', 'error');
-        return;
-    }
-
-    // Show persistent loading indicator in modal
-    const modalMinutes = document.getElementById('modal-minutes');
-    if (modalMinutes) {
-        modalMinutes.innerHTML = `
-            <div style="
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                padding: 80px 40px;
-                gap: 24px;
-                background: linear-gradient(135deg, rgba(99, 102, 241, 0.05) 0%, rgba(168, 85, 247, 0.05) 100%);
-                border-radius: 16px;
-                position: relative;
-                overflow: hidden;
-            ">
-                <!-- Animated background gradient -->
-                <div style="
-                    position: absolute;
-                    top: -50%;
-                    left: -50%;
-                    width: 200%;
-                    height: 200%;
-                    background: radial-gradient(circle, rgba(99, 102, 241, 0.1) 0%, transparent 70%);
-                    animation: rotate 8s linear infinite;
-                "></div>
-                
-                <!-- Floating particles -->
-                <div style="
-                    position: absolute;
-                    width: 100%;
-                    height: 100%;
-                    top: 0;
-                    left: 0;
-                    overflow: hidden;
-                ">
-                    <div style="position: absolute; top: 20%; left: 10%; width: 4px; height: 4px; background: rgba(99, 102, 241, 0.4); border-radius: 50%; animation: float 3s ease-in-out infinite;"></div>
-                    <div style="position: absolute; top: 60%; left: 80%; width: 6px; height: 6px; background: rgba(168, 85, 247, 0.4); border-radius: 50%; animation: float 4s ease-in-out infinite 1s;"></div>
-                    <div style="position: absolute; top: 40%; left: 70%; width: 3px; height: 3px; background: rgba(99, 102, 241, 0.3); border-radius: 50%; animation: float 5s ease-in-out infinite 2s;"></div>
-                </div>
-                
-                <!-- Main icon container -->
-                <div style="
-                    position: relative;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    width: 80px;
-                    height: 80px;
-                    background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
-                    border-radius: 20px;
-                    box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3), 0 0 0 0 rgba(99, 102, 241, 0.4);
-                    animation: pulse-ring 2s ease-in-out infinite;
-                ">
-                    <i class="fa-solid fa-language" style="
-                        color: white;
-                        font-size: 36px;
-                        animation: bounce-subtle 2s ease-in-out infinite;
-                    "></i>
-                </div>
-                
-                <!-- Text content -->
-                <div style="position: relative; text-align: center; z-index: 1;">
-                    <p style="
-                        font-size: 20px;
-                        font-weight: 700;
-                        color: var(--text-primary);
-                        margin: 0 0 8px 0;
-                        letter-spacing: -0.02em;
-                    ">Translating to ${getLanguageName(language)}</p>
-                    
-                    <!-- Animated dots -->
-                    <div style="display: flex; justify-content: center; gap: 6px; margin-bottom: 12px;">
-                        <div style="width: 8px; height: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 50%; animation: dot-bounce 1.4s ease-in-out infinite;"></div>
-                        <div style="width: 8px; height: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 50%; animation: dot-bounce 1.4s ease-in-out infinite 0.2s;"></div>
-                        <div style="width: 8px; height: 8px; background: linear-gradient(135deg, #6366f1, #a855f7); border-radius: 50%; animation: dot-bounce 1.4s ease-in-out infinite 0.4s;"></div>
-                    </div>
-                    
-                    <p style="
-                        font-size: 14px;
-                        color: var(--text-secondary);
-                        margin: 0;
-                        font-weight: 500;
-                    ">This may take a few moments</p>
-                </div>
-                
-                <!-- Progress bar -->
-                <div style="
-                    width: 200px;
-                    height: 4px;
-                    background: rgba(99, 102, 241, 0.1);
-                    border-radius: 2px;
-                    overflow: hidden;
-                    position: relative;
-                    z-index: 1;
-                ">
-                    <div style="
-                        width: 100%;
-                        height: 100%;
-                        background: linear-gradient(90deg, #6366f1, #a855f7, #6366f1);
-                        background-size: 200% 100%;
-                        animation: shimmer 2s linear infinite;
-                    "></div>
-                </div>
-            </div>
-            
-            <style>
-                @keyframes pulse-ring {
-                    0%, 100% {
-                        box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3), 0 0 0 0 rgba(99, 102, 241, 0.4);
-                    }
-                    50% {
-                        box-shadow: 0 8px 32px rgba(99, 102, 241, 0.4), 0 0 0 20px rgba(99, 102, 241, 0);
-                    }
-                }
-                
-                @keyframes bounce-subtle {
-                    0%, 100% { transform: translateY(0); }
-                    50% { transform: translateY(-8px); }
-                }
-                
-                @keyframes rotate {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                }
-                
-                @keyframes float {
-                    0%, 100% { transform: translateY(0); opacity: 0.3; }
-                    50% { transform: translateY(-20px); opacity: 0.8; }
-                }
-                
-                @keyframes dot-bounce {
-                    0%, 80%, 100% { transform: scale(0); opacity: 0.5; }
-                    40% { transform: scale(1); opacity: 1; }
-                }
-                
-                @keyframes shimmer {
-                    0% { background-position: -200% 0; }
-                    100% { background-position: 200% 0; }
-                }
-            </style>
-        `;
-    }
-
-    try {
-        const summaryText = call.summary || '';
-
-        // Prepare request payload
-        const requestData = {
-            transcript: summaryText,
-            language: language,
-            diarization_data: []  // Empty array instead of null
-        };
-
-        const response = await fetch('/api/translate', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(requestData)
-        });
-
-        if (!response.ok) {
-            throw new Error('Translation failed');
-        }
-
-        const result = await response.json();
-
-        if (result.success && result.translated_text) {
-            // Update the minutes display with translated content
-            updateMinutesWithTranslation(callId, result.translated_text, language);
-            showToast(`Translated to ${getLanguageName(language)}!`, 'success');
-        } else {
-            // Restore original content on error
-            const call = allCalls.find(c => c.id === callId);
-            if (call) {
-                openModal(callId); // Refresh modal to show original content
-            }
-            showToast('Translation failed. Please try again.', 'error');
-        }
-    } catch (error) {
-        console.error('Translation error:', error);
-        // Restore original content on error
-        const call = allCalls.find(c => c.id === callId);
-        if (call) {
-            openModal(callId); // Refresh modal to show original content
-        }
-        showToast('Translation failed. Please try again.', 'error');
-    }
-}
 
 // Translation maps for UI labels
 const uiTranslations = {
     'en': {
         title: 'Minutes of Meeting',
+        summaryTitle: 'AI Summary',
         date: 'Date:',
         time: 'Time:',
         duration: 'Duration:',
         attendees: 'Attendees:',
         subject: 'Subject:',
-        opening: '1. Opening and Context:',
-        keyPoints: '2. Key Discussion Points:',
-        issues: '3. Issue Identification:',
-        resolution: '4. Resolution / Outcome:',
-        actionItems: '5. Action Items / Next Steps:',
-        tone: '6. Meeting Tone:',
+        opening: 'Overview',
+        keyPoints: 'Key Points',
+        callerIntent: 'What the Caller Wanted',
+        issues: 'Issue / Topic',
+        resolution: 'Resolution / Outcome',
+        actionItems: 'Next Steps / Action Items',
+        tone: 'Conversation Tone',
         notSpecified: '[Not specified]',
         participant: 'participant',
         participants: 'participants',
@@ -4161,17 +5104,19 @@ const uiTranslations = {
     },
     'ml': {
         title: 'മീറ്റിംഗിന്റെ മിനിട്ടുകൾ',
+        summaryTitle: 'AI സംഗ്രഹം',
         date: 'തീയതി:',
         time: 'സമയം:',
         duration: 'ദൈർഘ്യം:',
         attendees: 'പങ്കെടുക്കുന്നവർ:',
         subject: 'വിഷയം:',
-        opening: '1. ആരംഭവും സന്ദർഭവും:',
-        keyPoints: '2. പ്രധാന ചർച്ചാ പോയിന്റുകൾ:',
-        issues: '3. പ്രശ്നം തിരിച്ചറിയൽ:',
-        resolution: '4. പരിഹാരം / ഫലം:',
-        actionItems: '5. പ്രവർത്തന ഇനങ്ങൾ / അടുത്ത ഘട്ടങ്ങൾ:',
-        tone: '6. മീറ്റിംഗ് ടോൺ:',
+        opening: 'ആരംഭവും സന്ദർഭവും:',
+        keyPoints: 'പ്രധാന പോയിന്റുകൾ:',
+        callerIntent: 'വിളിച്ചതിന്റെ ഉദ്ദേശ്യം:',
+        issues: 'പ്രശ്നം / വിഷയം:',
+        resolution: 'പരിഹാരം / ഫലം:',
+        actionItems: 'അടുത്ത ഘട്ടങ്ങൾ:',
+        tone: 'സംഭാഷണ രീതി:',
         notSpecified: '[വ്യക്തമാക്കിയിട്ടില്ല]',
         participant: 'പങ്കാളി',
         participants: 'പങ്കാളികൾ',
@@ -4183,17 +5128,19 @@ const uiTranslations = {
     },
     'hi': {
         title: 'बैठक की कार्यवृत्त',
+        summaryTitle: 'AI सारांश',
         date: 'तारीख:',
         time: 'समय:',
         duration: 'अवधि:',
         attendees: 'उपस्थित:',
         subject: 'विषय:',
-        opening: '1. शुरुआत और संदर्भ:',
-        keyPoints: '2. मुख्य चर्चा बिंदु:',
-        issues: '3. समस्या की पहचान:',
-        resolution: '4. समाधान / परिणाम:',
-        actionItems: '5. कार्य वस्तुएँ / अगले कदम:',
-        tone: '6. बैठक का माहौल:',
+        opening: 'शुरुआत और संदर्भ:',
+        keyPoints: 'मुख्य चर्चा बिंदु:',
+        callerIntent: 'कॉल करने का इरादा:',
+        issues: 'समस्या / विषय:',
+        resolution: 'समाधान / परिणाम:',
+        actionItems: 'अगले कदम:',
+        tone: 'बातचीत का माहौल:',
         notSpecified: '[निर्दिष्ट नहीं]',
         participant: 'प्रतिभागी',
         participants: 'प्रतिभागियों',
@@ -4205,17 +5152,19 @@ const uiTranslations = {
     },
     'ar': {
         title: 'محضر الاجتماع',
+        summaryTitle: 'ملخص الذكاء الاصطناعي',
         date: 'التاريخ:',
         time: 'الوقت:',
         duration: 'المدة:',
         attendees: 'الحضور:',
         subject: 'الموضوع:',
-        opening: '1. الافتتاح والسياق:',
-        keyPoints: '2. نقاط النقاش الرئيسية:',
-        issues: '3. تحديد المشكلة:',
-        resolution: '4. الحل / النتيجة:',
-        actionItems: '5. بنود العمل / الخطوات التالية:',
-        tone: '6. نبرة الاجتماع:',
+        opening: 'الافتتاح والسياق:',
+        keyPoints: 'نقاط النقاش الرئيسية:',
+        callerIntent: 'غرض المتصل:',
+        issues: 'المشكلة / الموضوع:',
+        resolution: 'الحل / النتيجة:',
+        actionItems: 'الخطوات التالية:',
+        tone: 'نبرة الحديث:',
         notSpecified: '[غير محدد]',
         participant: 'مشارك',
         participants: 'مشاركون',
@@ -4242,7 +5191,7 @@ function getUITranslations(language) {
 }
 
 function updateMinutesWithTranslation(callId, translatedText, language) {
-    const call = allCalls.find(c => c.id === callId);
+    const call = allCalls.find(c => c.id == callId);
     if (!call) return;
 
     // Get UI translations for selected language
@@ -4292,8 +5241,10 @@ function updateMinutesWithTranslation(callId, translatedText, language) {
     // Date and Time section (keep original structure)
     minutesHtml += '<div class="minutes-meta">';
 
-    const summaryText = call.summary || '';
-    const originalData = JSON.parse(summaryText || '{}');
+    // Safe summary parsing
+    const originalData = (typeof call.summary === 'object' && call.summary !== null)
+        ? call.summary
+        : (tryParseJSON(call.summary) || {});
 
     // Date
     let meetingDate = ui.notSpecified;
@@ -4502,13 +5453,7 @@ function updateMinutesWithTranslation(callId, translatedText, language) {
     modalMinutes.innerHTML = minutesHtml;
 }
 
-// Close translation dropdown when clicking outside
-document.addEventListener('click', (e) => {
-    const menu = document.getElementById('minutes-translate-menu');
-    if (menu && !e.target.closest('.minutes-translate-dropdown')) {
-        menu.classList.remove('active');
-    }
-});
+
 
 // ============================================
 // Summary Translation Functions
@@ -4529,7 +5474,7 @@ async function translateSummary(callId, language, event) {
     const menu = document.getElementById('summary-translate-menu');
     if (menu) menu.classList.remove('active');
 
-    const call = allCalls.find(c => c.id === callId);
+    const call = allCalls.find(c => c.id == callId);
     if (!call) {
         showToast('Call not found', 'error');
         return;
@@ -4680,7 +5625,8 @@ async function translateSummary(callId, language, event) {
     }
 
     try {
-        const summaryText = call.summary || '';
+        // Ensure summaryText is a string (FastAPI expects str for transcript field)
+        const summaryText = typeof call.summary === 'object' ? JSON.stringify(call.summary) : (call.summary || '');
 
         // Prepare request payload
         const requestData = {
@@ -4709,7 +5655,7 @@ async function translateSummary(callId, language, event) {
             showToast(`Translated to ${getLanguageName(language)}!`, 'success');
         } else {
             // Restore original content on error
-            const call = allCalls.find(c => c.id === callId);
+            const call = allCalls.find(c => c.id == callId);
             if (call) {
                 openModal(callId); // Refresh modal to show original content
             }
@@ -4718,7 +5664,7 @@ async function translateSummary(callId, language, event) {
     } catch (error) {
         console.error('Translation error:', error);
         // Restore original content on error
-        const call = allCalls.find(c => c.id === callId);
+        const call = allCalls.find(c => c.id == callId);
         if (call) {
             openModal(callId); // Refresh modal to show original content
         }
@@ -4727,7 +5673,7 @@ async function translateSummary(callId, language, event) {
 }
 
 function updateSummaryWithTranslation(callId, translatedText, language) {
-    const call = allCalls.find(c => c.id === callId);
+    const call = allCalls.find(c => c.id == callId);
     if (!call) return;
 
     // Get UI translations for selected language
@@ -4744,7 +5690,7 @@ function updateSummaryWithTranslation(callId, translatedText, language) {
 
     // Add translation header
     summaryHtml += '<div class="summary-translate-header">';
-    summaryHtml += `<h4 class="summary-main-title">${ui.title || 'Call Summary'}</h4>`;
+    summaryHtml += `<h4 class="summary-main-title"><i class="fa-solid fa-brain" style="margin-right: 8px; color: var(--accent-primary);"></i> ${ui.summaryTitle || 'AI Summary'}</h4>`;
     summaryHtml += `
         <div class="summary-translate-dropdown">
             <button class="summary-translate-btn" onclick="toggleSummaryTranslate(event)">
@@ -4809,7 +5755,7 @@ function updateSummaryWithTranslation(callId, translatedText, language) {
                 <div class="summary-section">
                     <div class="summary-section-header">
                         <i class="fa-solid fa-bullseye"></i>
-                        <strong>What the Caller Wanted</strong>
+                        <strong>${ui.callerIntent || 'What the Caller Wanted'}</strong>
                     </div>
                     <p>${escapeHtml(translatedData.caller_intent)}</p>
                 </div>
@@ -4948,33 +5894,6 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ============================================
-// Profile Dropdown Toggle
-// ============================================
-document.addEventListener('DOMContentLoaded', () => {
-    const profileTrigger = document.getElementById('profile-trigger');
-    const profileDropdown = document.getElementById('profile-dropdown');
-
-    if (profileTrigger && profileDropdown) {
-        profileTrigger.addEventListener('click', (e) => {
-            e.stopPropagation();
-            profileDropdown.classList.toggle('active');
-        });
-
-        // Close dropdown when clicking outside
-        document.addEventListener('click', (e) => {
-            if (!profileTrigger.contains(e.target) && !profileDropdown.contains(e.target)) {
-                profileDropdown.classList.remove('active');
-            }
-        });
-
-        // Close dropdown when clicking inside (e.g., logout button)
-        profileDropdown.addEventListener('click', () => {
-            profileDropdown.classList.remove('active');
-        });
-    }
-});
-
-// ============================================
 // Search Functionality
 // ============================================
 
@@ -5013,12 +5932,20 @@ function applyFilters() {
         const sentiment = (call.sentiment || 'neutral').toLowerCase();
         if (!currentFilters.sentiments.includes(sentiment)) return false;
 
-        // Tags Filter
+        // Tags Filter - Improved: Only filter out if call has tags AND those tags are in our known list but not selected
         if (currentFilters.tags.length > 0) {
             const callTags = call.tags || [];
             if (callTags.length > 0) {
-                const hasMatchingTag = callTags.some(tag => currentFilters.tags.includes(tag));
-                if (!hasMatchingTag) return false;
+                // Get list of tags that ARE in our filter options
+                const knownFilterTags = ['Right Party Contact', 'PTP', 'Refusal', 'Dispute', 'Wrong Number', 'Callback Requested', 'Support', 'Billing'];
+                const categorizableTags = callTags.filter(tag => knownFilterTags.includes(tag));
+
+                // If the call has any tags we know about, at least one must be selected
+                if (categorizableTags.length > 0) {
+                    const hasMatchingTag = categorizableTags.some(tag => currentFilters.tags.includes(tag));
+                    if (!hasMatchingTag) return false;
+                }
+                // If it only has "unknown" tags, we show it (don't hide data)
             }
         }
 
@@ -5055,4 +5982,14 @@ function initializeLoadMoreButton() {
 
 async function loadMoreCalls() {
     await fetchCalls(true);
+}
+
+// Helper for safely parsing JSON
+function tryParseJSON(str) {
+    if (!str) return null;
+    try {
+        return JSON.parse(str);
+    } catch (e) {
+        return null; // Return null if parsing fails
+    }
 }

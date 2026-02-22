@@ -1,0 +1,461 @@
+/* ============================================================
+   Pending Queue — Theme-Aware Premium Styles
+   Light by default, dark when [data-theme="dark"]
+   ============================================================ */
+
+/* ── Section wrapper ─────────────────────────────────────────── */
+#pending-list-section {
+    padding: 24px 0;
+    font-family: 'Inter', 'Segoe UI', sans-serif;
+}
+
+/* ── Section Header ──────────────────────────────────────────── */
+.pq-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-bottom: 20px;
+    padding: 0 4px;
+}
+
+.pq-header-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+/* ── Amber icon wrap (same in both themes) ─────────────────── */
+.pq-icon-wrap {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.18), rgba(245, 158, 11, 0.06));
+    border: 1px solid rgba(251, 191, 36, 0.28);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #f59e0b;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+    box-shadow: 0 0 16px rgba(251, 191, 36, 0.12);
+}
+
+/* ── Title & subtitle ── light defaults ─────────────────────── */
+.pq-title {
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    /* #1e293b light / #fff dark */
+    margin: 0 0 2px;
+    letter-spacing: -0.3px;
+}
+
+.pq-subtitle {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    /* #475569 light / #cbd5e1 dark */
+    margin: 0;
+    font-weight: 400;
+}
+
+/* ── Header Actions ──────────────────────────────────────────── */
+.pq-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+/* Amber "In Queue" pill */
+.pq-queue-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 14px;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.14), rgba(245, 158, 11, 0.06));
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    border-radius: 100px;
+    color: #d97706;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+}
+
+/* Dark theme badge — brighter amber */
+[data-theme="dark"] .pq-queue-badge {
+    color: #fbbf24;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.18), rgba(245, 158, 11, 0.08));
+}
+
+/* ── Shared button base ────────────────────────────────────────*/
+.pq-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 16px;
+    border-radius: 8px;
+    font-size: 0.84rem;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.pq-btn:focus {
+    outline: none;
+}
+
+/* Ghost / Refresh — light */
+.pq-btn-ghost {
+    background: rgba(0, 0, 0, 0.04);
+    border-color: rgba(0, 0, 0, 0.1);
+    color: var(--text-secondary);
+}
+
+.pq-btn-ghost:hover {
+    background: rgba(0, 0, 0, 0.07);
+    border-color: rgba(0, 0, 0, 0.18);
+    color: var(--text-primary);
+}
+
+/* Ghost — dark override */
+[data-theme="dark"] .pq-btn-ghost {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.09);
+    color: #94a3b8;
+}
+
+[data-theme="dark"] .pq-btn-ghost:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.16);
+    color: #e2e8f0;
+}
+
+/* Danger / Clear All */
+.pq-btn-danger {
+    background: rgba(239, 68, 68, 0.06);
+    border-color: rgba(239, 68, 68, 0.25);
+    color: #dc2626;
+}
+
+.pq-btn-danger:hover {
+    background: rgba(239, 68, 68, 0.12);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #b91c1c;
+}
+
+[data-theme="dark"] .pq-btn-danger {
+    color: #f87171;
+}
+
+[data-theme="dark"] .pq-btn-danger:hover {
+    color: #fca5a5;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.14);
+}
+
+/* Success / Upload */
+.pq-btn-success {
+    background: linear-gradient(135deg, #16a34a, #15803d);
+    border-color: #15803d;
+    color: #fff;
+    box-shadow: 0 2px 10px rgba(22, 163, 74, 0.2);
+}
+
+.pq-btn-success:hover {
+    background: linear-gradient(135deg, #15803d, #166534);
+    box-shadow: 0 4px 16px rgba(22, 163, 74, 0.32);
+    transform: translateY(-1px);
+}
+
+/* ── Card ── light ───────────────────────────────────────────── */
+.pq-card {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 16px;
+    box-shadow:
+        0 4px 20px rgba(0, 0, 0, 0.06),
+        0 1px 0 rgba(255, 255, 255, 0.9) inset;
+    overflow: hidden;
+}
+
+/* Card — dark */
+[data-theme="dark"] .pq-card {
+    background: #131e35;
+    border-color: rgba(99, 102, 241, 0.15);
+    box-shadow:
+        0 4px 24px rgba(0, 0, 0, 0.35),
+        0 1px 0 rgba(255, 255, 255, 0.04) inset;
+}
+
+/* ── Table wrapper ───────────────────────────────────────────── */
+.pq-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* ── Table ───────────────────────────────────────────────────── */
+.pq-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: auto;
+}
+
+/* ── Table head — light ──────────────────────────────────────── */
+.pq-table thead tr {
+    background: #f8fafc;
+}
+
+.pq-table thead th {
+    padding: 13px 16px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: #64748b;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.07);
+    white-space: nowrap;
+    text-align: left;
+}
+
+/* Table head — dark */
+[data-theme="dark"] .pq-table thead tr {
+    background: #1e2a4a;
+}
+
+[data-theme="dark"] .pq-table thead th {
+    color: #64748b;
+    border-bottom-color: rgba(99, 102, 241, 0.15);
+}
+
+.pq-table thead th.pq-th-num,
+.pq-table thead th.pq-th-actions {
+    text-align: center;
+}
+
+/* ── Table rows — light ──────────────────────────────────────── */
+.pq-table tbody tr.pq-row {
+    border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+    transition: background 0.15s ease, border-left 0.15s ease;
+    border-left: 3px solid transparent;
+}
+
+.pq-table tbody tr.pq-row:nth-child(even) {
+    background: rgba(248, 250, 252, 0.7);
+}
+
+.pq-table tbody tr.pq-row:hover {
+    background: rgba(99, 102, 241, 0.04);
+    border-left-color: #6366f1;
+}
+
+/* Rows — dark */
+[data-theme="dark"] .pq-table tbody tr.pq-row {
+    border-bottom-color: rgba(255, 255, 255, 0.04);
+    background: transparent;
+}
+
+[data-theme="dark"] .pq-table tbody tr.pq-row:nth-child(even) {
+    background: rgba(22, 32, 50, 0.5);
+}
+
+[data-theme="dark"] .pq-table tbody tr.pq-row:hover {
+    background: rgba(99, 102, 241, 0.07);
+    border-left-color: #6366f1;
+}
+
+/* ── Cells — light ───────────────────────────────────────────── */
+.pq-table td {
+    padding: 11px 16px;
+    font-size: 0.84rem;
+    color: var(--text-secondary);
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+.pq-td-num {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    color: #4f46e5 !important;
+    font-weight: 600;
+    font-size: 0.82rem !important;
+    letter-spacing: 0.3px;
+}
+
+.pq-td-text {
+    color: var(--text-primary) !important;
+    font-weight: 500;
+}
+
+/* Num cells — dark */
+[data-theme="dark"] .pq-td-num {
+    color: #a5b4fc !important;
+}
+
+/* ── Row number badge — light ────────────────────────────────── */
+.pq-row-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid rgba(99, 102, 241, 0.2);
+    border-radius: 6px;
+    color: #4f46e5;
+    font-size: 0.75rem;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Consolas', monospace;
+}
+
+[data-theme="dark"] .pq-row-num {
+    background: rgba(99, 102, 241, 0.14);
+    color: #818cf8;
+}
+
+/* ── Date chip ───────────────────────────────────────────────── */
+.pq-date-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    background: rgba(0, 0, 0, 0.04);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 500;
+}
+
+[data-theme="dark"] .pq-date-chip {
+    background: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.07);
+    color: #94a3b8;
+}
+
+.pq-time-chip {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-top: 3px;
+    padding-left: 2px;
+}
+
+/* ── Delete button — light ───────────────────────────────────── */
+.pq-delete-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(239, 68, 68, 0.07);
+    border: 1px solid rgba(239, 68, 68, 0.18);
+    color: #dc2626;
+    cursor: pointer;
+    font-size: 0.8rem;
+    margin: 0 auto;
+    transition: all 0.2s ease;
+}
+
+.pq-delete-btn:hover {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+    transform: scale(1.1);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.15);
+}
+
+[data-theme="dark"] .pq-delete-btn {
+    color: #f87171;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+[data-theme="dark"] .pq-delete-btn:hover {
+    color: #fca5a5;
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.2);
+}
+
+/* Center actions column */
+.pq-table td:last-child {
+    text-align: center;
+}
+
+/* ── Empty State ─────────────────────────────────────────────── */
+.pq-empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 64px 24px;
+    text-align: center;
+    animation: pq-float 3s ease-in-out infinite;
+}
+
+@keyframes pq-float {
+
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-6px);
+    }
+}
+
+/* Empty icon — light */
+.pq-empty-icon {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(245, 158, 11, 0.04));
+    border: 1.5px solid rgba(251, 191, 36, 0.22);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #d97706;
+    font-size: 1.8rem;
+    margin-bottom: 20px;
+    box-shadow: 0 0 24px rgba(251, 191, 36, 0.1);
+}
+
+[data-theme="dark"] .pq-empty-icon {
+    color: #f59e0b;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.15), rgba(245, 158, 11, 0.05));
+    border-color: rgba(251, 191, 36, 0.25);
+    box-shadow: 0 0 30px rgba(251, 191, 36, 0.12);
+}
+
+.pq-empty-state h3 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 8px;
+}
+
+.pq-empty-state p {
+    font-size: 0.88rem;
+    color: var(--text-secondary);
+    margin: 0;
+    max-width: 260px;
+}
+
+/* ── Responsive ──────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    .pq-section-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .pq-header-actions {
+        width: 100%;
+    }
+
+    .pq-btn {
+        font-size: 0.8rem;
+        padding: 7px 12px;
+    }
+}

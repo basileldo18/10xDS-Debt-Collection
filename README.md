@@ -1,13 +1,13 @@
 # VoxAnalyze 🤖📞
 
-**VoxAnalyze** is a powerful, AI-driven call analysis dashboard designed to ingest audio calls (via upload, Google Drive sync, or Vapi live streams), transcribe them, and generate actionable insights using advanced LLMs.
+**VoxAnalyze** is a powerful, AI-driven call analysis dashboard designed to ingest audio calls (via upload or Vapi live streams), transcribe them, and generate actionable insights using advanced LLMs.
 
 ## 🚀 Features
 
 -   **Dashboard Overview**: Real-time stats on call volume, sentiment distribution, and category tags.
 -   **Audio Ingestion**:
     -   **File Upload**: Drag & drop support for multiple audio formats.
-    -   **Google Drive Sync**: Automatically monitors a specific Drive folder for new call recordings.
+
     -   **Vapi Integration**: Webhook support for real-time Live Call tracking and analysis from Vapi assistants.
 -   **AI Analysis**:
     -   **Transcription**: High-accuracy transcription using AssemblyAI.
@@ -31,7 +31,7 @@
     -   LLM: Meta Llama 3 (via Groq)
     -   Transcription: AssemblyAI
 -   **Voice AI**: Vapi
--   **Services**: Google Drive API, Gmail SMTP (Notifications)
+-   **Services**: Gmail SMTP (Notifications)
 
 ## 📦 Installation
 
@@ -60,7 +60,7 @@
         ```bash
         cp .env.example .env
         ```
-    -   Fill in your API keys (Groq, Supabase, AssemblyAI, Vapi, Google Drive ID).
+    -   Fill in your API keys (Groq, Supabase, AssemblyAI, Vapi).
 
 ## 🚀 Usage
 
@@ -79,7 +79,7 @@
 -   `GET /api/call-stats`: Get aggregate statistics.
 -   `POST /api/upload`: Upload and process audio files.
 -   `POST /api/translate`: Translate transcript/summary.
--   `POST /webhook/drive`: Handle Google Drive push notifications.
+
 -   `POST /api/vapi-call`: Handle Vapi webhooks.
 
 ## 📄 License
