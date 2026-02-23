@@ -1128,7 +1128,7 @@ async def login_required(request: Request):
 
 # --- Routes ---
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check for Render/Uptime monitoring."""
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -1246,8 +1246,18 @@ async def delete_pending_lead(lead_id: int, user_id: str = Depends(login_require
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request, user_id: str = Depends(login_required)):
+@app.api_route("/", methods=["GET", "HEAD"])
+async def index(request: Request):
+    # For HEAD requests (often used by health checks), return 200 immediately
+    if request.method == "HEAD":
+        return Response(status_code=200)
+
+    # Manual check for login instead of Depends(login_required) 
+    # This prevents automated 307 redirects for health check probes
+    user_id = request.session.get('user_id')
+    if not user_id:
+        return RedirectResponse(url="/login")
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "vapi_public_key": os.environ.get("VAPI_PUBLIC_KEY", ""),
@@ -2369,6 +2379,17 @@ if __name__ == "__main__":
     # Removed blocking syncs from here. They are now handled in startup_event background task.
     # sync_seen_ids_from_db()
     
-    port = int(os.environ.get("PORT", 8080))
-    print(f"[SERVER] Starting FastAPI Server with Uvicorn on port {port}...")
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
+    port = int(os.environ.get("PORT", 10000))
+    print(f"[SERVER] Starting FastAPI Server on 0.0.0.0:{port}...")
+    
+    # Render and other production hosts work better with reload=False
+    # and require higher timeouts for heavy analysis tasks.
+    is_prod = os.environ.get("RENDER") is not None
+    uvicorn.run(
+        "app:app", 
+        host="0.0.0.0", 
+        port=port, 
+        reload=not is_prod,
+        timeout_keep_alive=120,
+        workers=1 # Keep it to 1 worker on standard Render plans to avoid OOM
+    )

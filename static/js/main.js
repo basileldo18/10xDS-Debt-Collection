@@ -315,7 +315,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         console.log('[POLL] Periodic background refresh...');
         // Only call fetchCalls() - it already triggers fetchStats() internally
         await fetchCalls(false, false);
-    }, 60000);
+    }, 80000);
 });
 
 // Hide Page Loader
