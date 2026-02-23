@@ -1824,12 +1824,12 @@
     <div class="toast-container" id="toast-container"></div>
 
     <!-- ✅ SIMPLE VAPI WIDGET (Compact & Responsive) -->
-    <vapi-widget public-key="{{ vapi_public_key }}" assistant-id="{{ vapi_assistant_id }}" mode="voice"
-        position="bottom-right" theme="light" button-base-color="#3F0067" button-accent-color="#ffffff"
-        base-color="#ffffff" accent-color="#9344B3"
-        style="position: fixed; bottom: 1rem; right: 1rem; z-index: 9999; transform: scale(0.8); transform-origin: bottom right;">
-    </vapi-widget>
 
+    <vapi-widget public-key="{{ vapi_public_key }}" assistant-id="{{ vapi_assistant_id }}" mode="voice" theme="dark"
+        base-bg-color="#000000" accent-color="#552483" cta-button-color="#000000" cta-button-text-color="#ffffff"
+        border-radius="medium" size="compact" position="bottom-right" title="TALK WITH AI" start-button-text="Start"
+        end-button-text="End Call" chat-first-message="Hey, How can I help you today?"
+        chat-placeholder="Type your message..." voice-show-transcript="false" consent-required="false"></vapi-widget>
     <!-- Inject Config from Backend -->
     <script>
         window.SUPABASE_URL = "{{ supabase_url }}";

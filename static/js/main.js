@@ -310,13 +310,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Hide Page Loader after data is ready
     hidePageLoader();
 
-    // Secondary auto-refresh fallback (every 30s) in case SSE fails
+    // Unified auto-refresh fallback (every 60s)
     setInterval(async () => {
-        console.log('[POLL] Running background refresh fallback...');
-        await fetchCalls(false, false); // Refresh without loader
-        await fetchStats();
-        if (typeof initializeSentimentChart === 'function') initializeSentimentChart();
-    }, 30000);
+        console.log('[POLL] Periodic background refresh...');
+        // Only call fetchCalls() - it already triggers fetchStats() internally
+        await fetchCalls(false, false);
+    }, 60000);
 });
 
 // Hide Page Loader
@@ -1604,14 +1603,14 @@ async function clearPendingLeads() {
 function loadSettings() {
     const defaults = {
         pageSize: '25',
-        autoRefresh: '5',
+        autoRefresh: '60',
         dateFormat: 'short'
     };
     try {
         const saved = JSON.parse(localStorage.getItem('voxanalyze-settings'));
-        // Migration: Update old default 20s to new 5s automatically
-        if (saved && saved.autoRefresh === '20') {
-            saved.autoRefresh = '5';
+        // Migration: Update old default 5s/20s to new 60s automatically
+        if (saved && (saved.autoRefresh === '20' || saved.autoRefresh === '5')) {
+            saved.autoRefresh = '60';
             localStorage.setItem('voxanalyze-settings', JSON.stringify(saved));
         }
         return { ...defaults, ...saved };
@@ -1801,17 +1800,18 @@ async function fetchCalls(append = false, force = false) {
                 }
             }
 
-            // Handle Auto-Refresh (only on initial load or reset)
+            // Auto-refresh is now handled by the unified interval in DOMContentLoaded
+            // to avoid competing timers and redundant logs.
+            /*
             if (!append) {
                 if (autoRefreshTimerObj.id) clearTimeout(autoRefreshTimerObj.id);
-
                 const settings = loadSettings();
                 const refreshInterval = parseInt(settings.autoRefresh) || 60;
-
                 if (refreshInterval > 0) {
                     autoRefreshTimerObj.id = setTimeout(() => fetchCalls(false), refreshInterval * 1000);
                 }
             }
+            */
 
             applyFilters();
             initializeCategoriesChart(globalStats ? globalStats.tag_counts : allCalls);
