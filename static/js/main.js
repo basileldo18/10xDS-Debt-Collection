@@ -3412,6 +3412,16 @@ window.openModal = async function (callId) {
         modalFilename.textContent = 'Loading...';
     }
 
+    // Reset Translation tab content and language selector
+    const translationContent = document.getElementById('modal-translation');
+    const translationLangSelect = document.getElementById('translation-language');
+    if (translationContent) {
+        translationContent.innerHTML = '<p class="translation-placeholder">Select a language and click Translate to see the translation.</p>';
+    }
+    if (translationLangSelect) {
+        translationLangSelect.value = 'en'; // Reset to English
+    }
+
     // Lazy Load: Check if we have transcript/diarization. If not, fetch it.
     if (!call.transcript && !call.diarization_data) {
         console.log(`[MODAL] Fetching details for call ${callId}...`);
@@ -3574,39 +3584,37 @@ window.openModal = async function (callId) {
         }
 
         if (diarizationData.length > 0) {
-            // Build speaker-labeled transcript
-            let transcriptHtml = '';
+            // Build speaker-labeled transcript (DIARIZED VERSION)
+            let transcriptHtml = '<div class="diarized-transcript">';
 
-            transcriptHtml += '<div class="diarized-transcript">';
-
-            // Create a map to convert A, B, C... to Speaker 1, Speaker 2, Speaker 3...
             const speakerMap = {};
             let speakerIndex = 1;
 
             diarizationData.forEach((utterance, idx) => {
                 const originalSpeaker = utterance.speaker || 'Unknown';
 
-                // Simple logic: Use display_name if manually edited, otherwise use detected name, otherwise use Speaker N
+                // Assign Diana to Speaker 1, Customer Name to Speaker 2
                 let displaySpeaker;
                 if (utterance.display_name) {
-                    // User has manually edited this speaker's name
                     displaySpeaker = utterance.display_name;
                 } else {
-                    // First time seeing this speaker - assign Speaker N
                     if (!speakerMap[originalSpeaker]) {
-                        speakerMap[originalSpeaker] = `Speaker ${speakerIndex} `;
+                        speakerMap[originalSpeaker] = `Speaker ${speakerIndex}`;
                         speakerIndex++;
                     }
                     const mappedSpeaker = speakerMap[originalSpeaker];
 
-                    // Check if LLM detected a name for this speaker
-                    const detectedName = detectedSpeakers[mappedSpeaker];
-                    if (detectedName && typeof detectedName === 'string') {
-                        // Extract only the name part (before any comma)
-                        displaySpeaker = detectedName.split(',')[0].trim();
+                    // Specific mapping: Diana is Agent, Speaker 2 is User
+                    if (mappedSpeaker === 'Speaker 1') {
+                        displaySpeaker = 'Diana (Agent)';
+                    } else if (mappedSpeaker === 'Speaker 2' && modalFilename.textContent !== 'Call Analysis' && modalFilename.textContent !== 'Loading...') {
+                        displaySpeaker = modalFilename.textContent; // Use detected customer name
                     } else {
-                        // No detected name, use Speaker N
-                        displaySpeaker = mappedSpeaker;
+                        // Check if LLM detected a name
+                        const detectedName = detectedSpeakers[mappedSpeaker];
+                        displaySpeaker = (detectedName && typeof detectedName === 'string')
+                            ? detectedName.split(',')[0].trim()
+                            : mappedSpeaker;
                     }
                 }
 
@@ -3614,30 +3622,80 @@ window.openModal = async function (callId) {
                 const speakerClass = getSpeakerClass(originalSpeaker);
                 const startTimeMs = utterance.start || 0;
 
+                // Determine layout class (agent/user)
+                const layoutClass = (speakerClass.includes('agent') || displaySpeaker.includes('Diana')) ? 'agent' : 'user';
+
                 transcriptHtml += `
-                    <div class="utterance-line" data-index="${idx}">
-                        <span class="utterance-timestamp clickable-timestamp" data-time="${startTimeMs}" title="Click to jump to this point">[${timestamp}]</span>
-                        <span class="speaker-label ${speakerClass}" contenteditable="true" data-original="${escapeHtml(originalSpeaker)}">${escapeHtml(displaySpeaker)}</span>
-                        <span class="utterance-text" contenteditable="true" dir="auto">${escapeHtml(utterance.text)}</span>
+                    <div class="utterance-line ${layoutClass}" data-index="${idx}">
+                        <div class="utterance-meta">
+                            <span class="utterance-timestamp clickable-timestamp" data-time="${startTimeMs}" title="Click to jump to this point">[${timestamp}]</span>
+                            <span class="speaker-label ${speakerClass}" contenteditable="true" data-original="${escapeHtml(originalSpeaker)}">${escapeHtml(displaySpeaker)}</span>
+                        </div>
+                        <div class="utterance-text" contenteditable="true" dir="auto">${escapeHtml(utterance.text)}</div>
                     </div>
                 `;
             });
 
             transcriptHtml += '</div>';
             modalText.innerHTML = transcriptHtml;
-
-            // Setup speaker name auto-update listeners with save functionality
             setupSpeakerEditListeners(call.id, diarizationData);
-
-            // Setup transcript text edit listeners with save functionality
             setupTranscriptTextEditListeners(call.id, diarizationData);
-
-            // Setup timestamp click listeners to seek audio
             setupTimestampClickListeners();
+        } else if (call.transcript) {
+            // Fallback: Parse plain transcript (VAPI FAST VERSION)
+            // Vapi transcripts often look like "AI: Hello... User: Hi..." or "Diana: ... Customer: ..."
+            let transcriptHtml = '<div class="diarized-transcript">';
+            const rawText = call.transcript;
+
+            // Try to split by common markers
+            const parts = rawText.split(/(?=AI:|User:|Diana:|Customer:)/i);
+
+            if (parts.length > 1) {
+                parts.forEach((part, idx) => {
+                    let speaker = 'Unknown';
+                    let text = part.trim();
+                    let layoutClass = 'agent';
+                    let speakerClass = 'speaker-1 agent';
+
+                    if (text.match(/^AI:|^Diana:/i)) {
+                        speaker = 'Diana (Agent)';
+                        text = text.replace(/^AI:|^Diana:/i, '').trim();
+                        layoutClass = 'agent';
+                        speakerClass = 'speaker-1 agent';
+                    } else if (text.match(/^User:|^Customer:/i)) {
+                        speaker = modalFilename.textContent !== 'Call Analysis' && modalFilename.textContent !== 'Loading...'
+                            ? modalFilename.textContent : 'Customer';
+                        text = text.replace(/^User:|^Customer:/i, '').trim();
+                        layoutClass = 'user';
+                        speakerClass = 'speaker-2 user';
+                    }
+
+                    if (text) {
+                        transcriptHtml += `
+                            <div class="utterance-line ${layoutClass}">
+                                <div class="utterance-meta">
+                                    <span class="speaker-label ${speakerClass}">${escapeHtml(speaker)}</span>
+                                </div>
+                                <div class="utterance-text" dir="auto">${escapeHtml(text)}</div>
+                            </div>
+                        `;
+                    }
+                });
+            } else {
+                // Just one big bubble if no markers found
+                transcriptHtml += `
+                    <div class="utterance-line agent">
+                        <div class="utterance-text plain-transcript-bubble" dir="auto">${escapeHtml(rawText)}</div>
+                    </div>
+                `;
+            }
+
+            transcriptHtml += '</div>';
+            modalText.innerHTML = transcriptHtml;
         } else {
-            // Fallback to plain transcript
-            modalText.innerHTML = `<p dir="auto">${escapeHtml(call.transcript || 'No transcript available')}</p>`;
+            modalText.innerHTML = `<div class="pq-empty-state"><p>No transcript available yet. Analysis may be in progress.</p></div>`;
         }
+
     }
 
     // Populate summary
@@ -4004,11 +4062,16 @@ function setupTranslationButton(call) {
                             const speakerClass = getSpeakerClass(originalSpeaker);
                             const startTimeMs = utterance.start || 0;
 
+                            // Determine layout class (agent/user)
+                            const layoutClass = (speakerClass.includes('agent') || displaySpeaker.includes('Diana')) ? 'agent' : 'user';
+
                             translationHtml += `
-                                <div class="utterance-line" data-index="${idx}">
-                                    <span class="utterance-timestamp clickable-timestamp" data-time="${startTimeMs}" title="Click to jump to this point">[${timestamp}]</span>
-                                    <span class="speaker-label ${speakerClass}" data-original="${escapeHtml(originalSpeaker)}">${escapeHtml(displaySpeaker)}</span>
-                                    <span class="utterance-text">${escapeHtml(utterance.text)}</span>
+                                <div class="utterance-line ${layoutClass}" data-index="${idx}">
+                                    <div class="utterance-meta">
+                                        <span class="utterance-timestamp clickable-timestamp" data-time="${startTimeMs}" title="Click to jump to this point">[${timestamp}]</span>
+                                        <span class="speaker-label ${speakerClass}" data-original="${escapeHtml(originalSpeaker)}">${escapeHtml(displaySpeaker)}</span>
+                                    </div>
+                                    <div class="utterance-text">${escapeHtml(utterance.text)}</div>
                                 </div>
                             `;
                         });
@@ -4172,13 +4235,11 @@ function setupTimestampClickListeners() {
 
 // Helper: Get CSS class for speaker coloring
 function getSpeakerClass(speaker) {
-    if (!speaker) return 'speaker-a';
-    const speakerUpper = speaker.toUpperCase();
-    if (speakerUpper === 'A' || speakerUpper === 'SPEAKER A') return 'speaker-a';
-    if (speakerUpper === 'B' || speakerUpper === 'SPEAKER B') return 'speaker-b';
-    if (speakerUpper === 'C' || speakerUpper === 'SPEAKER C') return 'speaker-c';
-    if (speakerUpper === 'D' || speakerUpper === 'SPEAKER D') return 'speaker-d';
-    return 'speaker-a';
+    if (!speaker) return 'speaker-1 agent';
+    const s = speaker.toString().toUpperCase();
+    if (s === '1' || s === 'A' || s.includes('SPEAKER 1') || s.includes('AGENT')) return 'speaker-1 agent';
+    if (s === '2' || s === 'B' || s.includes('SPEAKER 2') || s.includes('USER') || s.includes('CUSTOMER')) return 'speaker-2 user';
+    return 'speaker-1 agent';
 }
 
 // Helper: Get CSS class for conversation tone styling
@@ -4375,8 +4436,7 @@ function setupCopyButton(call) {
                     const diarizationData = call.diarization_data;
 
                     // Build speaker map (same logic as display)
-                    const speakerMap = {};
-                    let speakerIndex = 1;
+
 
                     // Try to get speaker identification from summary
                     let detectedSpeakers = {};
@@ -4404,30 +4464,37 @@ function setupCopyButton(call) {
                     }
 
                     // Format each utterance
+                    const speakerMap = {};
+                    let speakerIndex = 1;
+
                     diarizationData.forEach((utterance) => {
                         const originalSpeaker = utterance.speaker || 'Unknown';
-
-                        // Simple logic: Use display_name if manually edited, otherwise use detected name, otherwise use Speaker N
                         let displaySpeaker;
+
                         if (utterance.display_name) {
-                            // User has manually edited this speaker's name
                             displaySpeaker = utterance.display_name;
                         } else {
-                            // First time seeing this speaker - assign Speaker N
                             if (!speakerMap[originalSpeaker]) {
                                 speakerMap[originalSpeaker] = `Speaker ${speakerIndex}`;
                                 speakerIndex++;
                             }
                             const mappedSpeaker = speakerMap[originalSpeaker];
 
-                            // Check if LLM detected a name for this speaker
-                            const detectedName = detectedSpeakers[mappedSpeaker];
-                            if (detectedName && typeof detectedName === 'string') {
-                                // Extract only the name part (before any comma)
-                                displaySpeaker = detectedName.split(',')[0].trim();
+                            // Specific mapping: Diana is Agent, Speaker 2 is User
+                            if (mappedSpeaker === 'Speaker 1') {
+                                displaySpeaker = 'Diana (Agent)';
+                            } else if (mappedSpeaker === 'Speaker 2' && modalFilename.textContent !== 'Call Analysis' && modalFilename.textContent !== 'Loading...') {
+                                displaySpeaker = modalFilename.textContent; // Use detected customer name
                             } else {
-                                // No detected name, use Speaker N
-                                displaySpeaker = mappedSpeaker;
+                                // Check if LLM detected a name for this speaker
+                                const detectedName = detectedSpeakers[mappedSpeaker];
+                                if (detectedName && typeof detectedName === 'string') {
+                                    // Extract only the name part (before any comma)
+                                    displaySpeaker = detectedName.split(',')[0].trim();
+                                } else {
+                                    // No detected name, use Speaker N
+                                    displaySpeaker = mappedSpeaker;
+                                }
                             }
                         }
 
@@ -4457,6 +4524,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const backdrop = document.querySelector('.modal-backdrop');
 
     const closeModal = () => {
+        // Pause audio immediately when closing starts
+        const audio = document.getElementById('modal-audio');
+        if (audio) {
+            audio.pause();
+            audio.currentTime = 0;
+        }
+
         if (modal) {
             const modalContent = modal.querySelector('.modal-content');
             const modalBackdrop = modal.querySelector('.modal-backdrop');
@@ -4473,13 +4547,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Remove closing classes for next open
                 if (modalContent) modalContent.classList.remove('closing');
                 if (modalBackdrop) modalBackdrop.classList.remove('closing');
-
-                // Pause audio when closing
-                const audio = document.getElementById('modal-audio');
-                if (audio) {
-                    audio.pause();
-                    audio.currentTime = 0;
-                }
             }, 350); // Match the macOS animation duration
         }
     };

@@ -733,14 +733,29 @@ def encode_audio_to_base64(file_path):
         print(f"[AUDIO] Error encoding audio: {e}")
         return None
 
-def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None, audio_url=None):
+def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None, audio_url=None, vapi_transcript=None, existing_id=None):
     try:
-        transcript, duration_seconds, diarization_data, speaker_count, detected_lang = transcribe_audio(file_path, language_code, speakers_expected)
+        # Decision: Use Vapi for Speed (first time) or AssemblyAI for Quality (update or first time without vapi source)
+        if vapi_transcript and not existing_id:
+            print(f"[PROCESS] Fast-processing with Vapi transcript for {original_filename}")
+            transcript = vapi_transcript
+            duration_seconds = 0
+            diarization_data = None
+            speaker_count = 0
+            detected_lang = language_code or "en"
+            try:
+                import wave
+                with wave.open(file_path, 'r') as f:
+                    duration_seconds = f.getnframes() / float(f.getframerate())
+            except: pass
+        else:
+            print(f"[PROCESS] Running high-quality AssemblyAI transcription for {original_filename}...")
+            transcript, duration_seconds, diarization_data, speaker_count, detected_lang = transcribe_audio(file_path, language_code, speakers_expected)
+        
         sentiment, tags, summary, speakers = analyze_transcript(transcript, diarization_data=diarization_data)
         
         # Patch diarization_data with detected speaker names
         if speakers and diarization_data:
-            # Reconstruct the Speaker 1, 2 mapping used in analyze_transcript
             sorted_diarization = sorted(diarization_data, key=lambda x: x.get('start', 0))
             speaker_map = {}
             speaker_index = 1
@@ -749,49 +764,25 @@ def process_audio_file(file_path, original_filename, language_code=None, speaker
                 if orig_id not in speaker_map:
                     label = f"Speaker {speaker_index}"
                     name = speakers.get(label, label)
-                    # Safety: only take the name part if LLM included a role with a comma
                     if isinstance(name, str) and ',' in name:
                         name = name.split(',')[0].strip()
                     speaker_map[orig_id] = name
                     speaker_index += 1
                 segment['display_name'] = speaker_map[orig_id]
-            
-            # Update original diarization_data with display names
             diarization_data = sorted_diarization
-            # Update speaker count based on detected speakers if possible
             if len(speaker_map) > 0:
                 speaker_count = len(speaker_map)
 
-        email_sent = False
-        
         if not audio_url:
-            print(f"[STORAGE] Generating Base64 fallback for {original_filename}...")
             audio_url = encode_audio_to_base64(file_path)
-            
-        if not audio_url:
-            print(f"[STORAGE] Warning: No audio URL generated for {original_filename}")
-
-        
-        # Generate Call ID (TXN-XXXX)
-        call_id_display = None
-        if supabase:
-            try:
-                # Use max(id) to avoid duplicates if rows were deleted
-                max_resp = supabase.table('calls').select("id").order("id", desc=True).limit(1).execute()
-                next_id = (max_resp.data[0]['id'] if max_resp.data else 0) + 1
-                call_id_display = f"TXN-{2801 + next_id}"
-            except:
-                pass
 
         data = {
-            "call_id": call_id_display,
             "filename": original_filename,
             "transcript": transcript,
             "sentiment": sentiment,
             "tags": tags,
             "summary": summary,
             "duration": int(duration_seconds),
-            "email_sent": False,
             "audio_url": audio_url,
             "diarization_data": diarization_data,
             "speaker_count": speaker_count,
@@ -799,36 +790,39 @@ def process_audio_file(file_path, original_filename, language_code=None, speaker
         }
         
         if supabase:
-            # Retry logic for DB insert to handle transient socket errors (like WinError 10035)
-            max_retries = 3
-            for attempt in range(max_retries):
+            if existing_id:
+                print(f"[DB] Updating existing record {existing_id} with quality results...")
+                supabase.table('calls').update(data).eq('id', existing_id).execute()
+                data['id'] = existing_id
+            else:
+                # Generate TXN ID
                 try:
-                    # Double check if this file was already processed by another thread/process
-                    # (e.g. race between webhook and manual upload)
-                    if attempt == 0: # Only check existence on first attempt
-                        exists = supabase.table('calls').select("id").eq("filename", original_filename).execute()
-                        if exists.data:
-                            print(f"[DB] Skipping save: {original_filename} already exists in database.")
-                            return exists.data[0]
-
-                    if attempt == 0: # Send email only once
-                         try:
-                             email_sent = send_email_notification(original_filename, sentiment, tags, summary)
-                             data["email_sent"] = email_sent
-                         except Exception as email_err:
-                             print(f"[EMAIL] Warning during processing: {email_err}")
-
-                    supabase.table('calls').insert(data).execute()
-                    print(f"[DB] Saved results for {original_filename}")
-                    break # Success!
-                except Exception as db_err:
-                    print(f"[DB] Error (Attempt {attempt+1}/{max_retries}): {db_err}")
-                    if attempt < max_retries - 1:
-                        time.sleep(2) # Wait before retry
-                    else:
-                        print(f"[DB] FAILED to save {original_filename} after {max_retries} attempts.")
+                    max_resp = supabase.table('calls').select("id").order("id", desc=True).limit(1).execute()
+                    next_id = (max_resp.data[0]['id'] if max_resp.data else 0) + 1
+                    data["call_id"] = f"TXN-{2801 + next_id}"
+                except: pass
                 
+                # Check for duplicates before insert
+                exists = supabase.table('calls').select("id").eq("filename", original_filename).execute()
+                if exists.data and not existing_id:
+                    print(f"[DB] File {original_filename} already exists. Updating instead.")
+                    supabase.table('calls').update(data).eq('id', exists.data[0]['id']).execute()
+                    data['id'] = exists.data[0]['id']
+                else:
+                    resp = supabase.table('calls').insert(data).execute()
+                    if resp.data:
+                        data['id'] = resp.data[0]['id']
+                        # Send email on first save only
+                        try:
+                            send_email_notification(original_filename, sentiment, tags, summary)
+                        except: pass
+                        
         return data
+    except Exception as e:
+        print(f"Error processing file: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     except Exception as e:
         print(f"Error processing file: {e}")
         return None
@@ -991,7 +985,16 @@ async def handle_end_of_call(message: dict, call_data: dict, background_tasks: B
             medium = 'Web'
         
         print(f"[VAPI-WEBHOOK] Detected medium: {medium} (call_type='{call_type}')")
-        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, medium)
+        
+        # Extract full transcript from report if available to avoid re-transcription delay
+        vapi_transcript = message.get('transcript')
+        if not vapi_transcript and 'artifact' in message:
+            vapi_transcript = message['artifact'].get('transcript')
+            
+        if vapi_transcript:
+            print(f"[VAPI-WEBHOOK] Transcript found in report ({len(vapi_transcript)} chars). Passing to background task.")
+
+        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, medium, vapi_transcript)
     else:
         print("[VAPI-WEBHOOK] No recording URL found (or no background tasks), skipping file processing.")
 
@@ -2147,7 +2150,7 @@ async def notifications_stream(request: Request):
 
 # --- Vapi Webhook Handling ---
 
-async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager, medium: str = None):
+async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager, medium: str = None, vapi_transcript: str = None):
     """
     Background task to process Vapi call and broadcast updates.
     """
@@ -2222,18 +2225,32 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         print("[VAPI] Supabase upload confirmed. Starting Analysis Pipeline...")
         await notification_manager.broadcast(create_event("analyze", "Analyzing call sentiment..."))
 
-        # Pass the Supabase Storage URL directly to process_audio_file to avoid heavy Base64 encoding
-        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url)
-        
-        # Notify dashboard that data is saved (triggers instant refresh in main.js)
-        await notification_manager.broadcast(json.dumps({
-            "step": "save", 
-            "status": "complete", 
-            "message": "Database updated! Refreshing dashboard..."
-        }))
+        # Pass the Supabase Storage URL and transcript
+        # 1. IMMEDIATE FAST UPDATE (using Vapi transcript)
+        fast_result = None
+        if vapi_transcript:
+            print("[VAPI] Performing immediate FAST analysis for dashboard...")
+            fast_result = await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url, vapi_transcript=vapi_transcript)
+            
+            # Notify dashboard immediately (triggers refresh with initial AI analysis)
+            await notification_manager.broadcast(json.dumps({
+                "step": "save", 
+                "status": "complete", 
+                "message": "Dashboard updated with initial analysis. High-quality diarization in progress..."
+            }))
 
-        print("[VAPI] Processing Complete!")
-        await notification_manager.broadcast(create_event("done", "Analysis complete!", "success"))
+        # 2. QUALITY UPDATE (using AssemblyAI for perfect diarization)
+        print("[VAPI] Starting high-quality AssemblyAI processing...")
+        await notification_manager.broadcast(create_event("analyze", "Perfecting speaker diarization..."))
+        
+        existing_id = fast_result.get('id') if fast_result else None
+        
+        # Run again without transcript to trigger AssemblyAI
+        # This will update the existing record if we have an ID from the fast save
+        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url, existing_id=existing_id)
+        
+        print("[VAPI] Quality Processing Complete!")
+        await notification_manager.broadcast(create_event("done", "Full quality analysis complete!", "success"))
         
     except Exception as e:
         print(f"[VAPI] Error processing Vapi call: {e}")
