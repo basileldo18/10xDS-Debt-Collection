@@ -2221,36 +2221,22 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         else:
             await notification_manager.broadcast(create_event("upload", "File already in Supabase Storage. Proceeding...", "complete"))
             
-        # Run Analysis Pipeline (only if Supabase upload succeeded)
-        print("[VAPI] Supabase upload confirmed. Starting Analysis Pipeline...")
-        await notification_manager.broadcast(create_event("analyze", "Analyzing call sentiment..."))
-
-        # Pass the Supabase Storage URL and transcript
-        # 1. IMMEDIATE FAST UPDATE (using Vapi transcript)
-        fast_result = None
-        if vapi_transcript:
-            print("[VAPI] Performing immediate FAST analysis for dashboard...")
-            fast_result = await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url, vapi_transcript=vapi_transcript)
-            
-            # Notify dashboard immediately (triggers refresh with initial AI analysis)
-            await notification_manager.broadcast(json.dumps({
-                "step": "save", 
-                "status": "complete", 
-                "message": "Dashboard updated with initial analysis. High-quality diarization in progress..."
-            }))
-
-        # 2. QUALITY UPDATE (using AssemblyAI for perfect diarization)
+        # Run High-Quality Analysis Pipeline (AssemblyAI)
         print("[VAPI] Starting high-quality AssemblyAI processing...")
-        await notification_manager.broadcast(create_event("analyze", "Perfecting speaker diarization..."))
+        await notification_manager.broadcast(create_event("analyze", "Running high-quality transcription and deep analysis..."))
         
-        existing_id = fast_result.get('id') if fast_result else None
+        # We no longer do a "fast" save. We wait for the quality result before first insert.
+        # This satisfies the requirement that entries only appear once finalized.
+        analysis_result = await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url)
         
-        # Run again without transcript to trigger AssemblyAI
-        # This will update the existing record if we have an ID from the fast save
-        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url, existing_id=existing_id)
-        
-        print("[VAPI] Quality Processing Complete!")
-        await notification_manager.broadcast(create_event("done", "Full quality analysis complete!", "success"))
+        if analysis_result:
+            print("[VAPI] Quality Processing Complete!")
+            # Trigger dashboard refresh by sending save/complete notification
+            await notification_manager.broadcast(create_event("save", "Analysis saved to records", "complete"))
+            await notification_manager.broadcast(create_event("done", "Full quality analysis complete!", "success"))
+        else:
+            print("[VAPI] Analysis failed to produce results.")
+            await notification_manager.broadcast(create_event("error", "Analysis failed to finalize", "error"))
         
     except Exception as e:
         print(f"[VAPI] Error processing Vapi call: {e}")
