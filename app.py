@@ -848,55 +848,38 @@ async def vapi_webhook(request: Request, background_tasks: BackgroundTasks):
         payload = await request.json()
         print(f"[VAPI-WEBHOOK] Received Event: {json.dumps(payload)[:500]}...") # Log first 500 chars
 
-        message = payload.get('message', {})
+        # 1. Normalize Payload (Support both nested and flat structures)
+        message = payload.get('message', payload)
+        message_type = message.get('type')
         
-        # Try to find call object in top-level or inside message
-        call_data = payload.get('call')
-        if not call_data:
-            call_data = message.get('call', {})
-            
-        # Try to find call_id
-        call_id = call_data.get('id')
-        if not call_id:
-            # Fallback: check other common locations
-            call_id = message.get('call_id') or message.get('callId') or payload.get('call_id')
-            
-        # Inject found ID back into call_data for handlers to use
+        # 2. Extract Call ID (Use same robust logic across all endpoints)
+        call_data = payload.get('call') or message.get('call') or {}
+        call_id = call_data.get('id') or message.get('callId') or message.get('call_id') or payload.get('call_id')
+        
+        # Inject for handlers
         if call_id and isinstance(call_data, dict):
             call_data['id'] = call_id
 
-        print(f"[VAPI-WEBHOOK] Extracted Call ID: {call_id}")
-
-        message_type = message.get('type')
-        print(f"[VAPI-WEBHOOK] Message Type: {message_type}")
+        print(f"[VAPI-WEBHOOK] Extracted Type: {message_type}, Call ID: {call_id}")
         
-        # Ensure Call Exists in DB (Important for FK constraints)
-        if call_id and supabase:
-            # If we receive ANY event for a call ID, ensure it's tracked as 'in-progress' unless it's an end report
-            if message_type not in ['end-of-call-report']:
-                try:
-                    data = {
-                        'call_id': call_id,
-                        'status': 'in-progress',
-                        'updated_at': datetime.now(timezone.utc).isoformat()
-                    }
-                    if call_data.get('customer'):
-                        data['customer_phone'] = call_data.get('customer', {}).get('number')
-                    
-                    # Use on_conflict='call_id' to ensure we update existing records
-                    supabase.table('vapi_calls').upsert(data, on_conflict='call_id').execute()
-                    print(f"[VAPI-WEBHOOK] Tracked/Updated active call {call_id}")
-                except Exception as e:
-                    print(f"[VAPI-WEBHOOK] Error tracking active call: {e}")
+        # 3. Ensure record exists without overwriting 'ended' status
+        if call_id and supabase and message_type not in ['end-of-call-report']:
+            await ensure_vapi_call_exists(call_id, call_data)
 
+        # 4. Route to specific handlers
         if message_type == 'transcript':
             await handle_transcript(message, call_data)
         elif message_type == 'end-of-call-report':
             await handle_end_of_call(message, call_data, background_tasks)
-        elif message_type == 'status-update':
+        elif message_type in ['status-update', 'call-status-update']:
             await handle_status_update(message, call_data)
-        elif message_type in ['conversation-update', 'speech-update']:
-            # Just tracking presence (handled above)
+        elif message_type in ['conversation-update']:
+            # Optional: Extract full transcript from conversation-update if transcript events are missing
+            transcript_str = message.get('transcript')
+            if transcript_str and call_id:
+                 print(f"[VAPI-WEBHOOK] Conversation Update received for {call_id}")
+                 # We don't overwrite everything here yet to avoid conflicts with handle_transcript,
+                 # but we could use this as a source if needed.
             pass
             
         return JSONResponse(status_code=200, content={"success": True})
@@ -927,31 +910,30 @@ async def handle_transcript(message: dict, call_data: dict):
         
         last_entry = last_res.data[0] if last_res.data else None
         
-        # 2. If valid last entry exists and ROLE MATCHES current role -> MERGE (Update)
+        # 0. Deduplicate: Ignore if the exact same transcript was just added to the last turn
         if last_entry and last_entry.get('role') == role:
             prev_text = last_entry.get('transcript', '')
-            # Simple spacing check
+            if transcript.strip() in prev_text:
+                return # Skip duplicate from redundant webhooks
+
+            # 1. Merge (Update) if same speaker and new content
             new_text = f"{prev_text.strip()} {transcript.strip()}"
-            
-            # Update the existing row
             supabase.table('transcripts').update({
                 'transcript': new_text,
-                'timestamp': ist_time.isoformat() # Update timestamp to latest utterance
+                'timestamp': ist_time.isoformat()
             }).eq('id', last_entry['id']).execute()
-            
-            print(f"[VAPI-WEBHOOK] Merged transcript ({role}): ... {transcript[:30]}...")
+            print(f"[VAPI-WEBHOOK] Merged ({role}): ...{transcript[:30]}...")
             
         else:
-            # 3. Else (New Speaker or First Entry) -> INSERT
+            # 2. New Speaker (or First Entry) -> INSERT
             data = {
                 'call_id': call_data.get('id'),
-                'role': role,
+                'role': 'user' if role in ['customer', 'user'] else 'assistant',
                 'transcript': transcript,
                 'timestamp': ist_time.isoformat()
             }
-            
             supabase.table('transcripts').insert(data).execute()
-            print(f"[VAPI-WEBHOOK] Saved new turn ({role}): {transcript[:30]}...")
+            print(f"[VAPI-WEBHOOK] New Turn ({role}): {transcript[:30]}...")
 
     except Exception as e:
         print(f"[VAPI-WEBHOOK] DB Error (Transcript): {e}")
@@ -1039,26 +1021,66 @@ async def handle_end_of_call(message: dict, call_data: dict, background_tasks: B
     except Exception as e:
         print(f"[VAPI-WEBHOOK] DB Error (Report/Status Fallback): {e}")
 
+async def ensure_vapi_call_exists(call_id: str, call_data: dict):
+    """Ensure a call record exists in vapi_calls without overwriting 'ended' status."""
+    if not supabase or not call_id: return
+    try:
+        data = {
+            'call_id': call_id,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }
+        # Extract customer phone if available
+        customer_phone = call_data.get('customer', {}).get('number')
+        if customer_phone:
+            data['customer_phone'] = customer_phone
+            
+        # Omit 'status' so it defaults to 'in-progress' on INSERT but doesn't overwrite on UPDATE
+        supabase.table('vapi_calls').upsert(data, on_conflict='call_id').execute()
+    except Exception as e:
+        print(f"[VAPI-DB] Error ensuring call exists: {e}")
+
 async def handle_status_update(message: dict, call_data: dict):
     """Track call status."""
     if not supabase: return
 
     try:
-        status = message.get('status')
+        raw_status = str(message.get('status', '')).lower().replace('_', '-')
         call_id = call_data.get('id')
         
+        # Normalize common status variations
+        status_map = {
+            'completed': 'ended',
+            'failed': 'ended',
+            'error': 'ended',
+            'finished': 'ended'
+        }
+        status = status_map.get(raw_status, raw_status)
+        
         # Only track essential statuses to avoid premature "Live" display
-        if status not in ['in-progress', 'ended']:
+        if status not in ['in-progress', 'ended', 'started']:
             print(f"[VAPI-WEBHOOK] Ignoring status update: {call_id} -> {status}")
             return
             
+        # Normalize 'started' to 'in-progress' for dashboard consistency
+        if status == 'started': status = 'in-progress'
+            
         print(f"[VAPI-WEBHOOK] Call Status Update: {call_id} -> {status}")
         
-        supabase.table('vapi_calls').upsert({
+        data = {
             'call_id': call_id,
             'status': status,
             'updated_at': datetime.now(timezone.utc).isoformat()
-        }).execute()
+        }
+        
+        # Capture timestamps if available
+        if status == 'in-progress':
+            data['started_at'] = datetime.now(timezone.utc).isoformat()
+        elif status == 'ended':
+            data['ended_at'] = datetime.now(timezone.utc).isoformat()
+            if 'cost' in message: data['cost'] = message['cost']
+            if 'summary' in message: data['summary'] = message['summary']
+
+        supabase.table('vapi_calls').upsert(data, on_conflict='call_id').execute()
     except Exception as e:
         print(f"[VAPI-WEBHOOK] DB Error (Status): {e}")
 
@@ -2275,8 +2297,11 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
                 except Exception as e:
                     print(f"[VAPI-CALL] Error updating call status: {e}")
 
-        # --- 2. Handle Live Transcripts (Use shared helper for merging logic) ---
-        elif message_type == 'transcript':
+        # --- 2. Track presence & Transcripts ---
+        if call_id and supabase:
+            await ensure_vapi_call_exists(call_id, call_data)
+
+        if message_type == 'transcript':
             await handle_transcript(message, call_data)
 
         # --- 3. Extract Recording URL & Kick Off Processing ---

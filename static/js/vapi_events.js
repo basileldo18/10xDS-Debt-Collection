@@ -109,30 +109,38 @@ async function handleVapiCallEnd(callDetail) {
         callDetail?.stereoRecordingUrl ||
         callDetail?.artifact?.recordingUrl;
 
+    // 1. Notify backend of the call end event (Ensures status is updated to 'ended')
+    const payload = {
+        message: {
+            type: 'status-update',
+            status: 'ended'
+        },
+        call: callDetail,
+        call_id: callDetail?.id || callDetail?.callId
+    };
+
+    // If recording URL is available, include it
     if (recordingUrl) {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const filename = `vapi_call_${timestamp}.wav`;
+        payload.recording_url = recordingUrl;
+        payload.filename = `vapi_call_${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
 
         if (window.notificationService) {
             window.notificationService.showToast('Call Ended', 'Initiating processing...', 'info', 'fa-phone-slash');
         }
+    }
 
-        try {
-            const response = await fetch('/api/vapi-call', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    recording_url: recordingUrl,
-                    filename: filename
-                })
-            });
+    try {
+        const response = await fetch('/api/vapi-call', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
 
-            if (response.ok) {
-                console.log('[Vapi] Backend processing triggered.');
-            }
-        } catch (err) {
-            console.error('[Vapi] Error triggering backend:', err);
+        if (response.ok) {
+            console.log('[Vapi] Webhook sent to backend (Status/Recording).');
         }
+    } catch (err) {
+        console.error('[Vapi] Error triggering backend:', err);
     }
 
     // Optional: Refresh list after a short delay
