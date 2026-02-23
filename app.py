@@ -733,7 +733,7 @@ def encode_audio_to_base64(file_path):
         print(f"[AUDIO] Error encoding audio: {e}")
         return None
 
-def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None):
+def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None, audio_url=None):
     try:
         transcript, duration_seconds, diarization_data, speaker_count, detected_lang = transcribe_audio(file_path, language_code, speakers_expected)
         sentiment, tags, summary, speakers = analyze_transcript(transcript, diarization_data=diarization_data)
@@ -764,7 +764,10 @@ def process_audio_file(file_path, original_filename, language_code=None, speaker
 
         email_sent = False
         
-        audio_url = encode_audio_to_base64(file_path)
+        if not audio_url:
+            print(f"[STORAGE] Generating Base64 fallback for {original_filename}...")
+            audio_url = encode_audio_to_base64(file_path)
+            
         if not audio_url:
             print(f"[STORAGE] Warning: No audio URL generated for {original_filename}")
 
@@ -2218,10 +2221,17 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         # Run Analysis Pipeline (only if Supabase upload succeeded)
         print("[VAPI] Supabase upload confirmed. Starting Analysis Pipeline...")
         await notification_manager.broadcast(create_event("analyze", "Analyzing call sentiment..."))
+
+        # Pass the Supabase Storage URL directly to process_audio_file to avoid heavy Base64 encoding
+        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url)
         
-        # process_audio_file is synchronous
-        await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium)
-        
+        # Notify dashboard that data is saved (triggers instant refresh in main.js)
+        await notification_manager.broadcast(json.dumps({
+            "step": "save", 
+            "status": "complete", 
+            "message": "Database updated! Refreshing dashboard..."
+        }))
+
         print("[VAPI] Processing Complete!")
         await notification_manager.broadcast(create_event("done", "Analysis complete!", "success"))
         

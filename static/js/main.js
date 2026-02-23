@@ -309,6 +309,14 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Hide Page Loader after data is ready
     hidePageLoader();
+
+    // Secondary auto-refresh fallback (every 30s) in case SSE fails
+    setInterval(async () => {
+        console.log('[POLL] Running background refresh fallback...');
+        await fetchCalls(false, false); // Refresh without loader
+        await fetchStats();
+        if (typeof initializeSentimentChart === 'function') initializeSentimentChart();
+    }, 30000);
 });
 
 // Hide Page Loader
