@@ -897,27 +897,8 @@ async def handle_transcript(message: dict, call_data: dict):
     transcript_type = message.get('transcriptType')
     role = message.get('role')
     transcript = message.get('transcript')
-    call_id = call_data.get('id')
-
+    print(transcript)
     if transcript_type != 'final' or not transcript:
-        # We STILL want to broadcast partial transcripts for realtime viewing, 
-        # but they aren't saved to the DB so they don't need deduplication.
-        if transcript:
-            try:
-                payload = {
-                    "type": "vapi_transcript",
-                    "call_id": call_id,
-                    "detail": {
-                        "call_id": call_id,
-                        "role": role,
-                        "transcript": transcript,
-                        "transcriptType": transcript_type,
-                        "type": "transcript"
-                    }
-                }
-                await notification_manager.broadcast(json.dumps(payload))
-            except Exception as e:
-                print(f"[VAPI-WEBHOOK] Broadcast error (partial transcript): {e}")
         return
 
     if not supabase:
@@ -935,64 +916,29 @@ async def handle_transcript(message: dict, call_data: dict):
         last_entry = last_res.data[0] if last_res.data else None
         
         # 0. Deduplicate: Ignore if the exact same transcript was just added to the last turn
-        if last_entry:
-            last_role = last_entry.get('role')
-            # Normalize role strings
-            norm_last = 'user' if last_role in ['customer', 'user'] else 'assistant'
-            norm_incoming = 'user' if role in ['customer', 'user'] else 'assistant'
+        if last_entry and last_entry.get('role') == role:
+            prev_text = last_entry.get('transcript', '')
+            if transcript.strip() in prev_text:
+                return # Skip duplicate from redundant webhooks
 
-            if norm_last == norm_incoming:
-                prev_text = last_entry.get('transcript', '')
-                if transcript.strip() in prev_text:
-                    print(f"[VAPI-WEBHOOK] Deduplicated identical transcript block: {transcript[:30]}...")
-                    return # Skip duplicate from redundant webhooks
-
-                # 1. Merge (Update) if same speaker and new content
-                new_text = f"{prev_text.strip()} {transcript.strip()}"
-                supabase.table('transcripts').update({
-                    'transcript': new_text,
-                    'timestamp': current_time.isoformat()
-                }).eq('id', last_entry['id']).execute()
-                print(f"[VAPI-WEBHOOK] Merged ({role}): ...{transcript[:30]}...")
-                
-            else:
-                # 2. New Speaker (or First Entry) -> INSERT
-                data = {
-                    'call_id': call_id,
-                    'role': norm_incoming,
-                    'transcript': transcript,
-                    'timestamp': current_time.isoformat()
-                }
-                supabase.table('transcripts').insert(data).execute()
-                print(f"[VAPI-WEBHOOK] New Turn ({role}): {transcript[:30]}...")
+            # 1. Merge (Update) if same speaker and new content
+            new_text = f"{prev_text.strip()} {transcript.strip()}"
+            supabase.table('transcripts').update({
+                'transcript': new_text,
+                'timestamp': current_time.isoformat()
+            }).eq('id', last_entry['id']).execute()
+            print(f"[VAPI-WEBHOOK] Merged ({role}): ...{transcript[:30]}...")
+            
         else:
-            # First ever entry
-            norm_incoming = 'user' if role in ['customer', 'user'] else 'assistant'
+            # 2. New Speaker (or First Entry) -> INSERT
             data = {
-                'call_id': call_id,
-                'role': norm_incoming,
+                'call_id': call_data.get('id'),
+                'role': 'user' if role in ['customer', 'user'] else 'assistant',
                 'transcript': transcript,
                 'timestamp': current_time.isoformat()
             }
             supabase.table('transcripts').insert(data).execute()
-            print(f"[VAPI-WEBHOOK] First Turn ({role}): {transcript[:30]}...")
-
-        # Broadcast FINAL transcripts ONLY AFTER deduplication confirms it's valid!
-        try:
-            payload = {
-                "type": "vapi_transcript",
-                "call_id": call_id,
-                "detail": {
-                    "call_id": call_id,
-                    "role": role,
-                    "transcript": transcript,
-                    "transcriptType": transcript_type,
-                    "type": "transcript"
-                }
-            }
-            await notification_manager.broadcast(json.dumps(payload))
-        except Exception as e:
-            print(f"[VAPI-WEBHOOK] Broadcast error (final transcript): {e}")
+            print(f"[VAPI-WEBHOOK] New Turn ({role}): {transcript[:30]}...")
 
     except Exception as e:
         print(f"[VAPI-WEBHOOK] DB Error (Transcript): {e}")

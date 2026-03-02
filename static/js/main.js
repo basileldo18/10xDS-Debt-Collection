@@ -102,15 +102,6 @@ class NotificationService {
             return;
         }
 
-        // Handle vapi_transcript for fast realtime partial transcripts via webhook
-        if (data.type === 'vapi_transcript') {
-            if (window.handleRealtimeTranscript) {
-                // The backend passes detail block directly
-                window.handleRealtimeTranscript(data.detail);
-            }
-            return;
-        }
-
         // Handle vapi_call_ended
         if (data.type === 'vapi_call_ended') {
             console.log('[NOTIFY] Live call ended:', data.call_id);
