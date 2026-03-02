@@ -73,8 +73,36 @@ window.initializeVapiEvents = async (widget) => {
             detail.status === 'failed'
         ) {
             handleVapiCallEnd(detail);
+        } else if (detail.type === 'transcript') {
+            console.log('[Vapi] Realtime transcript intercepted:', detail);
+            if (window.handleRealtimeTranscript) {
+                window.handleRealtimeTranscript(detail);
+            }
+        } else if (detail.message && detail.message.type === 'transcript') {
+            if (window.handleRealtimeTranscript) {
+                window.handleRealtimeTranscript(detail.message);
+            }
         }
     });
+
+    // Also try to hook into the raw Vapi instance if exposed by the embed
+    const bindRawVapi = () => {
+        const vapiInstance = window.vapi || window.Vapi;
+        if (vapiInstance && typeof vapiInstance.on === 'function') {
+            console.log('[Vapi] Bound to raw Vapi SDK instance for high-frequency events.');
+            vapiInstance.on('message', (msg) => {
+                if (msg && msg.type === 'transcript' && window.handleRealtimeTranscript) {
+                    window.handleRealtimeTranscript(msg);
+                }
+            });
+            return true;
+        }
+        return false;
+    };
+
+    if (!bindRawVapi()) {
+        setTimeout(bindRawVapi, 2000); // Try again after widget loads
+    }
 };
 
 window.showSidebarLiveIndicator = function () {

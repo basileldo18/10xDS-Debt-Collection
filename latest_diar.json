@@ -1,0 +1,20 @@
+[
+  {
+    "diarization_data": [
+      {
+        "end": 16291,
+        "text": "Hi there, I hope your day is going well. My name is Diana and I'm calling from 10 XDS Debt Collection Agency. Is this a good time to speak with you?",
+        "start": 1525,
+        "speaker": "A",
+        "display_name": "Diana"
+      },
+      {
+        "end": 27471,
+        "text": "Are you still there?",
+        "start": 20675,
+        "speaker": "A",
+        "display_name": "Diana"
+      }
+    ]
+  }
+]

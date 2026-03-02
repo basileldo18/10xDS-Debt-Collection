@@ -411,15 +411,20 @@ def analyze_transcript_with_groq(text):
 
 1. Sentiment: Classify as exactly one of: "Positive", "Negative", or "Neutral"
 2. Tags: List relevant tags from these options: "Billing", "Support", "Churn Risk", "Sales", "Feedback", "Complaint", "Technical Issue", "Right Party Contact", "Payment Made", "Promise to Pay", "Refusal", "Dispute", "Wrong Number", "Callback Requested"
-3. Speakers: Map the conversation to Speaker 1 and Speaker 2.
+3. Customer Identification: Carefully analyze the transcript to find the customer's real name (Speaker 2). Look for identity verification, introductions, or how they were addressed. 
+   - Extract the customer's full name (e.g., "Basil Eldo" or "Diana").
+   - If a speaker verifies their name, use that.
+   - Extract ONLY the name if available.
+   - NEVER combine name with role (e.g., use "Diana" NOT "Diana, Agent").
+   - If the specific name is unknown after thorough analysis, use "Customer".
+
+4. Speakers: Map the conversation to Speaker 1 and Speaker 2.
    - **Speaker 1**: Always the Agent / 10xDS representative.
    - **Speaker 2**: Always the Customer / Debtor.
-   - **IMPORTANT**: If a speaker verifies their name (e.g., "Basil Eldo"), use that name for the respective speaker.
-   - Extract ONLY the name if available (e.g., "Diana"). 
-   - NEVER combine name with role (e.g., use "Diana" NOT "Diana, Agent").
-   - If the specific name is unknown, use "Agent" for Speaker 1 and "Customer" for Speaker 2.
+   - Use the extracted names from step 3 for these labels if available.
+   - If unknown, use "Agent" and "Customer".
 
-4. Summary: A detailed summary with the following structure:
+5. Summary: A detailed summary with the following structure:
    
    - **overview**: Write a comprehensive paragraph (4-6 sentences minimum) that tells the complete story of the call. Include WHO was involved (specifically check if identity was verified), WHAT was discussed (especially the $200 overdue balance), WHY they called, and WHAT happened with the payment. Be specific and detailed.
    
@@ -456,6 +461,7 @@ Transcript:
 
 Respond ONLY in this exact JSON format:
 {{
+    "customer_name": "Full Name (e.g., 'Diana') or 'Customer' if unknown",
     "sentiment": "Positive" or "Negative" or "Neutral",
     "tags": ["tag1", "tag2"],
     "speakers": {{
@@ -531,6 +537,7 @@ Respond ONLY in this exact JSON format:
         tags = result.get("tags", [])
         speakers = result.get("speakers", {})
         summary_data = result.get("summary", {})
+        customer_name = result.get("customer_name", "Customer")
         
         # Ensure required fields have defaults if missing or too short
         if not summary_data.get("caller_intent") or len(summary_data.get("caller_intent", "")) < 20:
@@ -546,9 +553,10 @@ Respond ONLY in this exact JSON format:
         # or keep separate. The UI usually looks for 'summary'.
         if speakers:
             summary_data["detected_speakers"] = speakers
-
-        if speakers:
-            summary_data["detected_speakers"] = speakers
+        
+        # Explicit customer name for frontend display
+        if customer_name:
+            summary_data["customer_name"] = customer_name
 
         if sentiment not in ["Positive", "Negative", "Neutral"]:
             sentiment = "Neutral"
@@ -733,15 +741,15 @@ def encode_audio_to_base64(file_path):
         print(f"[AUDIO] Error encoding audio: {e}")
         return None
 
-def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None, audio_url=None, vapi_transcript=None, existing_id=None):
+def process_audio_file(file_path, original_filename, language_code=None, speakers_expected=None, medium=None, audio_url=None, vapi_transcript=None, existing_id=None, vapi_diarization=None):
     try:
         # Decision: Use Vapi for Speed (first time) or AssemblyAI for Quality (update or first time without vapi source)
-        if vapi_transcript and not existing_id:
-            print(f"[PROCESS] Fast-processing with Vapi transcript for {original_filename}")
-            transcript = vapi_transcript
+        if (vapi_transcript or vapi_diarization) and not existing_id:
+            print(f"[PROCESS] Fast-processing with Vapi transcript/diarization for {original_filename}")
+            transcript = vapi_transcript or ""
             duration_seconds = 0
-            diarization_data = None
-            speaker_count = 0
+            diarization_data = vapi_diarization
+            speaker_count = len(set([x.get('speaker') for x in diarization_data])) if diarization_data else 0
             detected_lang = language_code or "en"
             try:
                 import wave
@@ -889,7 +897,26 @@ async def handle_transcript(message: dict, call_data: dict):
     transcript_type = message.get('transcriptType')
     role = message.get('role')
     transcript = message.get('transcript')
-    print(transcript)
+    call_id = call_data.get('id')
+
+    if transcript:
+        try:
+            # Broadcast to UI immediately for realtime fast display (partials + final)
+            payload = {
+                "type": "vapi_transcript",
+                "call_id": call_id,
+                "detail": {
+                    "call_id": call_id,
+                    "role": role,
+                    "transcript": transcript,
+                    "transcriptType": transcript_type,
+                    "type": "transcript"
+                }
+            }
+            await notification_manager.broadcast(json.dumps(payload))
+        except Exception as e:
+            print(f"[VAPI-WEBHOOK] Broadcast error (transcript): {e}")
+
     if transcript_type != 'final' or not transcript:
         return
 
@@ -898,8 +925,8 @@ async def handle_transcript(message: dict, call_data: dict):
         return
 
     try:
-        # IST Timezone (UTC + 5:30)
-        ist_time = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        # Use straight UTC time so the browser can convert it properly
+        current_time = datetime.now(timezone.utc)
         
         # 1. Check the LAST saved transcript for this call
         # Order by ID desc to get the very latest
@@ -917,7 +944,7 @@ async def handle_transcript(message: dict, call_data: dict):
             new_text = f"{prev_text.strip()} {transcript.strip()}"
             supabase.table('transcripts').update({
                 'transcript': new_text,
-                'timestamp': ist_time.isoformat()
+                'timestamp': current_time.isoformat()
             }).eq('id', last_entry['id']).execute()
             print(f"[VAPI-WEBHOOK] Merged ({role}): ...{transcript[:30]}...")
             
@@ -927,7 +954,7 @@ async def handle_transcript(message: dict, call_data: dict):
                 'call_id': call_data.get('id'),
                 'role': 'user' if role in ['customer', 'user'] else 'assistant',
                 'transcript': transcript,
-                'timestamp': ist_time.isoformat()
+                'timestamp': current_time.isoformat()
             }
             supabase.table('transcripts').insert(data).execute()
             print(f"[VAPI-WEBHOOK] New Turn ({role}): {transcript[:30]}...")
@@ -991,10 +1018,41 @@ async def handle_end_of_call(message: dict, call_data: dict, background_tasks: B
         if not vapi_transcript and 'artifact' in message:
             vapi_transcript = message['artifact'].get('transcript')
             
+        # Natively extract perfect diarization segmentation arrays instead of re-evaluating merged mono audio tracks via standard ASRAI
+        vapi_diarization = None
+        vapi_msgs = message.get('artifact', {}).get('messages') or message.get('messages')
+        if vapi_msgs and isinstance(vapi_msgs, list):
+            vapi_diarization = []
+            
+            # Find the baseline start time (earliest message time)
+            start_time_ms = None
+            for m in vapi_msgs:
+                t = m.get('time')
+                if t is not None:
+                    if start_time_ms is None or t < start_time_ms:
+                        start_time_ms = t
+            if start_time_ms is None:
+                start_time_ms = 0
+
+            for m in vapi_msgs:
+                r = m.get('role', '').lower()
+                text = m.get('message', '')
+                # Skip system prompts and tool calls
+                if r in ['system', 'tool_call', 'tool', 'function']:
+                    continue
+                if r and text:
+                    speaker_label = 'A' if r in ['bot', 'assistant'] else 'B'
+                    vapi_diarization.append({
+                        'speaker': speaker_label,
+                        'text': text,
+                        'start': max(0, m.get('time', start_time_ms) - start_time_ms),
+                        'end': max(0, m.get('endTime', m.get('time', start_time_ms)) - start_time_ms)
+                    })
+
         if vapi_transcript:
             print(f"[VAPI-WEBHOOK] Transcript found in report ({len(vapi_transcript)} chars). Passing to background task.")
 
-        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, medium, vapi_transcript)
+        background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, medium, vapi_transcript, vapi_diarization)
     else:
         print("[VAPI-WEBHOOK] No recording URL found (or no background tasks), skipping file processing.")
 
@@ -2160,7 +2218,7 @@ async def notifications_stream(request: Request):
 
 # --- Vapi Webhook Handling ---
 
-async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager, medium: str = None, vapi_transcript: str = None):
+async def process_vapi_call_background(url: str, temp_path: str, filename: str, notification_manager: NotificationManager, medium: str = None, vapi_transcript: str = None, vapi_diarization: list = None):
     """
     Background task to process Vapi call and broadcast updates.
     """
@@ -2237,7 +2295,7 @@ async def process_vapi_call_background(url: str, temp_path: str, filename: str, 
         
         # We no longer do a "fast" save. We wait for the quality result before first insert.
         # This satisfies the requirement that entries only appear once finalized.
-        analysis_result = await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url)
+        analysis_result = await run_in_threadpool(process_audio_file, temp_path, filename, medium=medium, audio_url=audio_url, vapi_transcript=vapi_transcript, vapi_diarization=vapi_diarization)
         
         if analysis_result:
             print("[VAPI] Quality Processing Complete!")
@@ -2343,7 +2401,42 @@ async def handle_vapi_call(request: Request, background_tasks: BackgroundTasks):
             safe_name = secure_filename(filename)
             temp_path = os.path.join(UPLOAD_FOLDER, safe_name)
             
-            background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager)
+            # Extract transcript and native diarization from Vapi artifact
+            vapi_transcript = message.get('transcript')
+            if not vapi_transcript and 'artifact' in message:
+                vapi_transcript = message['artifact'].get('transcript')
+                
+            vapi_diarization = None
+            vapi_msgs = message.get('artifact', {}).get('messages') or message.get('messages')
+            if vapi_msgs and isinstance(vapi_msgs, list):
+                vapi_diarization = []
+                
+                # Find the baseline start time (earliest message time)
+                start_time_ms = None
+                for m in vapi_msgs:
+                    t = m.get('time')
+                    if t is not None:
+                        if start_time_ms is None or t < start_time_ms:
+                            start_time_ms = t
+                if start_time_ms is None:
+                    start_time_ms = 0
+
+                for m in vapi_msgs:
+                    r = m.get('role', '').lower()
+                    text = m.get('message', '')
+                    # Skip system prompts and tool calls
+                    if r in ['system', 'tool_call', 'tool', 'function']:
+                        continue
+                    if r and text:
+                        speaker_label = 'A' if r in ['bot', 'assistant'] else 'B'
+                        vapi_diarization.append({
+                            'speaker': speaker_label,
+                            'text': text,
+                            'start': max(0, m.get('time', start_time_ms) - start_time_ms),
+                            'end': max(0, m.get('endTime', m.get('time', start_time_ms)) - start_time_ms)
+                        })            
+            
+            background_tasks.add_task(process_vapi_call_background, recording_url, temp_path, safe_name, notification_manager, vapi_transcript=vapi_transcript, vapi_diarization=vapi_diarization)
             return {"status": "processing", "message": "Call processing started"}
         
         return {"status": "received", "message": "Event processed"}

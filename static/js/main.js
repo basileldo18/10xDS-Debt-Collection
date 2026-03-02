@@ -102,6 +102,15 @@ class NotificationService {
             return;
         }
 
+        // Handle vapi_transcript for fast realtime partial transcripts via webhook
+        if (data.type === 'vapi_transcript') {
+            if (window.handleRealtimeTranscript) {
+                // The backend passes detail block directly
+                window.handleRealtimeTranscript(data.detail);
+            }
+            return;
+        }
+
         // Handle vapi_call_ended
         if (data.type === 'vapi_call_ended') {
             console.log('[NOTIFY] Live call ended:', data.call_id);
@@ -1941,17 +1950,23 @@ function renderTable(callsInput) {
                 } catch (e) { }
 
                 if (summaryData) {
-                    // Comprehensive search for speakers data
-                    const speakers = summaryData.detected_speakers || summaryData.speakers || (summaryData.summary && summaryData.summary.detected_speakers);
+                    // Priority 1: Use the explicit customer_name analyzed by LLM (new logic)
+                    if (summaryData.customer_name && summaryData.customer_name !== 'Customer' && summaryData.customer_name !== 'Unknown') {
+                        customerName = summaryData.customer_name;
+                    } else {
+                        // Priority 2: Comprehensive search for speakers data (fallback logic)
+                        const speakers = summaryData.detected_speakers || summaryData.speakers || (summaryData.summary && summaryData.summary.detected_speakers);
 
-                    if (speakers && typeof speakers === 'object') {
-                        // Look for Speaker 2 specifically as requested
-                        customerName = speakers['Speaker 2'] ||
-                            speakers['speaker 2'] ||
-                            speakers['Speaker 2 name'] ||
-                            speakers['2'] ||
-                            speakers['Customer'] ||
-                            'Customer';
+                        if (speakers && typeof speakers === 'object') {
+                            // Look for Speaker 2 specifically
+                            customerName = speakers['Speaker 2'] ||
+                                speakers['speaker 2'] ||
+                                speakers['Speaker 2 name'] ||
+                                speakers['2'] ||
+                                speakers['Customer'] ||
+                                summaryData.customer_name || // Final fallback to the generic value
+                                'Customer';
+                        }
                     }
                 }
 
@@ -2208,8 +2223,12 @@ window.openPaymentModal = function (callId) {
 
     // 1. Set Customer Name
     let customerName = 'Customer';
-    const speakers = summaryData?.detected_speakers || summaryData?.speakers;
-    if (speakers && speakers['Speaker 2']) customerName = speakers['Speaker 2'];
+    if (summaryData?.customer_name && summaryData.customer_name !== 'Customer' && summaryData.customer_name !== 'Unknown') {
+        customerName = summaryData.customer_name;
+    } else {
+        const speakers = summaryData?.detected_speakers || summaryData?.speakers;
+        if (speakers && speakers['Speaker 2']) customerName = speakers['Speaker 2'];
+    }
     document.getElementById('payment-modal-customer').textContent = customerName;
 
     // 2. Set Status Pill
@@ -2308,20 +2327,51 @@ function openDeleteModal(callId) {
         const desc = adminVerifyModal.querySelector('.admin-modal-desc');
         if (title) title.textContent = 'Delete Confirmation';
         if (desc) desc.textContent = 'This action requires administrator privileges';
-        if (adminVerifyConfirm) {
-            adminVerifyConfirm.innerHTML = '<i class="fa-solid fa-trash-can"></i> Confirm Delete';
-            adminVerifyConfirm.onclick = null; // Use the event listener add for delete
-        }
+        adminVerifyConfirm.innerHTML = '<i class="fa-solid fa-trash-can"></i> Confirm Delete';
+        adminVerifyConfirm.onclick = async () => {
+            const callId = deleteCallIdInput.value;
+            const password = adminPasswordInput.value;
 
-        const warningBox = adminVerifyModal.querySelector('.admin-warning-box');
-        if (warningBox) warningBox.style.display = 'flex';
+            if (!password) {
+                showToast('Please enter admin password', 'error');
+                return;
+            }
 
-        deleteCallIdInput.value = callId;
-        adminPasswordInput.value = ''; // Clear previous password
-        adminVerifyModal.style.display = 'flex';
-        // Close action menu
-        document.getElementById(`action - menu - ${callId} `)?.classList.remove('active');
+            adminVerifyConfirm.disabled = true;
+            const originalText = adminVerifyConfirm.innerHTML;
+            adminVerifyConfirm.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Deleting...';
+
+            try {
+                const response = await fetch('/api/admin/delete-call', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ call_id: callId, password: password })
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    showToast('Call deleted successfully', 'success');
+                    closeDeleteModal();
+                    fetchCalls(false, true);
+                } else {
+                    showToast(result.error || 'Delete failed', 'error');
+                }
+            } catch (err) {
+                console.error('Delete error:', err);
+                showToast('An error occurred', 'error');
+            } finally {
+                adminVerifyConfirm.disabled = false;
+                adminVerifyConfirm.innerHTML = originalText;
+            }
+        };
     }
+
+    const warningBox = adminVerifyModal.querySelector('.admin-warning-box');
+    if (warningBox) warningBox.style.display = 'flex';
+
+    deleteCallIdInput.value = callId;
+    adminPasswordInput.value = ''; // Clear previous password
+    adminVerifyModal.style.display = 'flex';
+    document.getElementById(`action-menu-${callId}`)?.classList.remove('active');
 }
 
 function closeDeleteModal() {
@@ -2336,51 +2386,8 @@ if (adminVerifyClose) adminVerifyClose.addEventListener('click', closeDeleteModa
 if (adminVerifyCancel) adminVerifyCancel.addEventListener('click', closeDeleteModal);
 
 if (adminVerifyConfirm) {
-    adminVerifyConfirm.addEventListener('click', async () => {
-        const callId = deleteCallIdInput.value;
-        const password = adminPasswordInput.value;
-
-        if (!password) {
-            showToast('Please enter admin password', 'error');
-            return;
-        }
-
-        // Disable button and show loading
-        const originalBtnText = adminVerifyConfirm.innerHTML;
-        adminVerifyConfirm.disabled = true;
-        adminVerifyConfirm.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Verifying...';
-
-        try {
-            const response = await fetch('/api/admin/delete-call', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    call_id: callId,
-                    password: password
-                })
-            });
-
-            const result = await response.json();
-
-            if (response.ok && result.success) {
-                showToast('Call deleted successfully', 'success');
-                closeDeleteModal();
-                // Refresh list
-                await fetchCalls(false, true);
-                initializeSentimentChart(); // Update charts
-            } else {
-                showToast(result.error || 'Delete failed', 'error');
-            }
-        } catch (error) {
-            console.error('Delete error:', error);
-            showToast('An error occurred during deletion', 'error');
-        } finally {
-            adminVerifyConfirm.disabled = false;
-            adminVerifyConfirm.innerHTML = originalBtnText;
-        }
-    });
+    // We'll set the onclick handler dynamically in openDeleteModal or openReanalyzeModal
+    // to avoid multiple listeners firing (e.g., both delete and re-analyze).
 }
 
 // Re-analyze Call Logic
@@ -2462,6 +2469,8 @@ function openReanalyzeModal(callId) {
     }
 
     modal.style.display = 'flex';
+    // Close action menu
+    document.getElementById(`action-menu-${callId}`)?.classList.remove('active');
 }
 // ============================================
 function updateStats(data) {
@@ -3515,9 +3524,12 @@ window.openModal = async function (callId) {
 
         // Try to get speaker identification from summary if available
         let detectedSpeakers = {};
+        let sData = {};
         try {
             const rawSummary = call.summary || '';
-            const sData = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
+            if (rawSummary) {
+                sData = typeof rawSummary === 'string' ? JSON.parse(rawSummary) : rawSummary;
+            }
 
             // Check for detected_speakers in various possible locations
             let speakersData = sData.detected_speakers || (sData.summary && sData.summary.detected_speakers) || {};
@@ -3564,8 +3576,12 @@ window.openModal = async function (callId) {
         if (modalFilename) {
             let customerName = '';
 
-            // Try Speaker 2 from detectedSpeakers
-            if (detectedSpeakers['Speaker 2']) {
+            // Priority 1: Use analyzed customer name
+            if (sData.customer_name && sData.customer_name !== 'Customer' && sData.customer_name !== 'Unknown') {
+                customerName = sData.customer_name.split(',')[0].trim();
+            }
+            // Priority 2: Try Speaker 2 from detectedSpeakers (fallback)
+            else if (detectedSpeakers['Speaker 2']) {
                 customerName = detectedSpeakers['Speaker 2'].split(',')[0].trim();
             } else if (detectedSpeakers['speaker 2']) {
                 customerName = detectedSpeakers['speaker 2'].split(',')[0].trim();

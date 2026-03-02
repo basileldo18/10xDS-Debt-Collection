@@ -10,7 +10,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let activeSubscription = null;
     let currentCallId = null;
-    let lastRole = null; // Track last role to group messages
     let durationTimer = null;
     let callStartTime = null;
 
@@ -105,7 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     </td>
                     <td style="color: var(--text-secondary); font-size: 0.85rem;">${new Date(call.created_at).toLocaleString()}</td>
                     <td style="text-align: right;">
-                        <button class="btn-live-view view-live-btn" data-id="${call.call_id}">
+                        <button class="btn-live-view view-live-btn" data-id="${call.call_id}" data-started-at="${call.started_at || call.created_at}">
                             <i class="fa-solid ${isLive ? 'fa-eye' : 'fa-list-alt'}"></i>
                             ${isLive ? 'Live View' : 'Transcript'}
                         </button>
@@ -116,7 +115,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 row.style.cursor = 'pointer';
                 row.addEventListener('click', (e) => {
                     if (e.target.closest('.view-live-btn')) return;
-                    openLiveModal(call.call_id);
+                    openLiveModal(call.call_id, call.started_at || call.created_at);
                 });
 
                 liveCallsTableBody.appendChild(row);
@@ -124,7 +123,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Attach Click Listeners
             document.querySelectorAll('.view-live-btn').forEach(btn => {
-                btn.addEventListener('click', () => openLiveModal(btn.dataset.id));
+                btn.addEventListener('click', () => openLiveModal(btn.dataset.id, btn.dataset.startedAt));
             });
 
         } catch (err) {
@@ -153,7 +152,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // --- Live Transcript Modal ---
-    window.openLiveModal = async function (callId) {
+    window.openLiveModal = async function (callId, startedAt = null) {
         if (!callId) return;
         currentCallId = callId;
 
@@ -178,7 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Start duration timer
-        callStartTime = Date.now();
+        callStartTime = startedAt ? new Date(startedAt).getTime() : Date.now();
         clearInterval(durationTimer);
         durationTimer = setInterval(() => {
             const elapsed = Math.floor((Date.now() - callStartTime) / 1000);
@@ -190,7 +189,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Reset Status
         connectionStatus.textContent = 'Connecting...';
-        lastRole = null;
 
         // Clear previous content and show loading
         // Clear previous content
@@ -356,23 +354,42 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // Before appending official DB message, remove temporary zero-latency bubbles that match
+        const tempBubbles = liveTranscriptContainer.querySelectorAll('.local-temp-bubble');
+        tempBubbles.forEach(tb => {
+            const tempRoleClass = tb.classList.contains('sent') ? 'user' : 'assistant';
+            if (tempRoleClass === t.role || (t.role === 'customer' && tempRoleClass === 'user')) {
+                const tempText = tb.querySelector('.msg-bubble')?.textContent?.trim() || '';
+                const incomingText = (t.transcript || '').trim();
+                // If the DB text is basically the same or includes it, drop the temp bubble to prevent duplicate.
+                if (tempText === incomingText || incomingText.includes(tempText) || tempText.includes(incomingText)) {
+                    tb.remove();
+                }
+            }
+        });
+
         // Determine role
-        const isUser = t.role === 'user';
+        const isUser = t.role === 'user' || t.role === 'customer';
         const roleLabel = isUser ? 'Customer' : 'AI Agent';
         const initials = isUser ? 'US' : 'AG';
 
         // Format timestamp
         const ts = t.timestamp ? new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
 
+        // DOM-based grouping logic
+        const prevNodes = Array.from(liveTranscriptContainer.querySelectorAll('.chat-msg-row')).filter(el => !el.classList.contains('local-temp-bubble') && !el.classList.contains('interim-msg'));
+        const lastRealNode = prevNodes.length > 0 ? prevNodes[prevNodes.length - 1] : null;
+        let isGroupMid = false;
+        if (lastRealNode) {
+            const wasUser = lastRealNode.classList.contains('sent');
+            if (isUser === wasUser) {
+                isGroupMid = true;
+            }
+        }
+
         const div = document.createElement('div');
         div.id = `msg-${t.id}`;
-        div.className = `chat-msg-row ${isUser ? 'sent' : 'received'}`;
-
-        // Grouping logic
-        if (lastRole === t.role) {
-            div.classList.add('group-mid');
-        }
-        lastRole = t.role;
+        div.className = `chat-msg-row ${isUser ? 'sent' : 'received'}${isGroupMid ? ' group-mid' : ''}`;
 
         div.innerHTML = `
             <div class="msg-avatar-wrap">
@@ -387,6 +404,98 @@ document.addEventListener('DOMContentLoaded', () => {
 
         liveTranscriptContainer.appendChild(div);
     }
+
+    // --- Realtime Transcript Handler (From Widget/Events) ---
+    window.handleRealtimeTranscript = function (detail) {
+        if (!currentCallId) return; // Only process if modal is open
+        // Ignore webhooks belonging to a different live call
+        if (detail.call_id && detail.call_id !== currentCallId) return;
+
+        if (!liveTranscriptContainer) return;
+
+        const emptyState = liveTranscriptContainer.querySelector('.empty-state') || liveTranscriptContainer.querySelector('.lct-empty-connecting');
+        if (emptyState) emptyState.remove();
+
+        const role = detail.role || 'user';
+        const transcriptText = detail.transcript || detail.text || '';
+        if (!transcriptText || transcriptText.trim() === '') return;
+
+        const transcriptType = detail.transcriptType || 'interim'; // 'interim' or 'final'
+        const isUser = role === 'user' || role === 'customer';
+        const roleLabel = isUser ? 'Customer' : 'AI Agent';
+        const initials = isUser ? 'US' : 'AG';
+        const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        const interimId = `msg-interim-${role}`;
+
+        if (transcriptType === 'final') {
+            // Remove the interim bubble
+            const existingInterim = document.getElementById(interimId);
+            if (existingInterim) existingInterim.remove();
+
+            // Group logic for temp final bubble
+            const prevNodes = Array.from(liveTranscriptContainer.querySelectorAll('.chat-msg-row'));
+            const lastNode = prevNodes.length > 0 ? prevNodes[prevNodes.length - 1] : null;
+            let isGroupMid = false;
+            if (lastNode && lastNode.classList.contains(isUser ? 'sent' : 'received')) {
+                isGroupMid = true;
+            }
+
+            // Insert a temporary "local" final bubble for instant 0-latency feedback.
+            // When the official Postgres refresh arrives, it will just append the real one.
+            // To prevent duplicates, we can give it a special class we wipe during Postgres syncs, or we just trust the UI looks fast.
+            const tempLocalId = `msg-local-final-${Date.now()}`;
+            const div = document.createElement('div');
+            div.id = tempLocalId;
+            div.className = `chat-msg-row ${isUser ? 'sent' : 'received'} local-temp-bubble${isGroupMid ? ' group-mid' : ''}`;
+            div.innerHTML = `
+                <div class="msg-avatar-wrap">
+                    <div class="msg-avatar-circle">${initials}</div>
+                </div>
+                <div class="msg-content">
+                    <div class="msg-role-label">${roleLabel}</div>
+                    <div class="msg-bubble">${transcriptText}</div>
+                    <div class="msg-timestamp">${ts}</div>
+                </div>
+            `;
+            liveTranscriptContainer.appendChild(div);
+            scrollToBottom();
+            return;
+        }
+
+        // --- Processing Interim ---
+        let div = document.getElementById(interimId);
+        if (!div) {
+            // Group logic for interim bubble
+            const prevNodes = Array.from(liveTranscriptContainer.querySelectorAll('.chat-msg-row'));
+            const lastNode = prevNodes.length > 0 ? prevNodes[prevNodes.length - 1] : null;
+            let isGroupMid = false;
+            if (lastNode && lastNode.classList.contains(isUser ? 'sent' : 'received')) {
+                isGroupMid = true;
+            }
+
+            div = document.createElement('div');
+            div.id = interimId;
+            div.className = `chat-msg-row ${isUser ? 'sent' : 'received'} interim-msg${isGroupMid ? ' group-mid' : ''}`;
+
+            div.innerHTML = `
+                <div class="msg-avatar-wrap">
+                    <div class="msg-avatar-circle">${initials}</div>
+                </div>
+                <div class="msg-content">
+                    <div class="msg-role-label">${roleLabel}</div>
+                    <div class="msg-bubble" style="opacity: 0.6; font-style: italic;">${transcriptText}</div>
+                    <div class="msg-timestamp">${ts}</div>
+                </div>
+            `;
+            liveTranscriptContainer.appendChild(div);
+        } else {
+            const textEl = div.querySelector('.msg-bubble');
+            if (textEl) textEl.textContent = transcriptText;
+        }
+
+        scrollToBottom();
+    };
 
     // --- Subscribe to Live Calls List (Auto-Refresh) ---
     function subscribeToLiveCallsList() {
@@ -465,7 +574,7 @@ document.addEventListener('DOMContentLoaded', () => {
             <td><span class="live-call-id">${newCall.call_id ? newCall.call_id.substring(0, 12) + '...' : 'Unknown'}</span></td>
             <td style="color: var(--text-secondary); font-size: 0.85rem;">${new Date(newCall.created_at).toLocaleString()}</td>
             <td style="text-align: right;">
-                <button class="btn-live-view view-live-btn" data-id="${newCall.call_id}">
+                <button class="btn-live-view view-live-btn" data-id="${newCall.call_id}" data-started-at="${newCall.started_at || newCall.created_at}">
                     <i class="fa-solid fa-eye"></i> Live View
                 </button>
             </td>
@@ -476,7 +585,7 @@ document.addEventListener('DOMContentLoaded', () => {
             row.innerHTML = rowHTML;
             // Re-attach listener
             const btn = row.querySelector('.view-live-btn');
-            if (btn) btn.addEventListener('click', () => openLiveModal(btn.dataset.id));
+            if (btn) btn.addEventListener('click', () => openLiveModal(btn.dataset.id, btn.dataset.startedAt));
         } else {
             // Prepend new row
             const newRow = document.createElement('tr');
@@ -493,12 +602,12 @@ document.addEventListener('DOMContentLoaded', () => {
             newRow.style.cursor = 'pointer';
             newRow.addEventListener('click', (e) => {
                 if (e.target.closest('.view-live-btn')) return;
-                openLiveModal(newCall.call_id);
+                openLiveModal(newCall.call_id, newCall.started_at || newCall.created_at);
             });
 
             // Attach listener
             const btn = newRow.querySelector('.view-live-btn');
-            if (btn) btn.addEventListener('click', () => openLiveModal(btn.dataset.id));
+            if (btn) btn.addEventListener('click', () => openLiveModal(btn.dataset.id, btn.dataset.startedAt));
         }
 
         // Keep sidebar badge in sync
