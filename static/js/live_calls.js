@@ -345,16 +345,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function upsertTranscriptToUI(t) {
-        const existingNode = document.getElementById(`msg-${t.id}`);
-
-        if (existingNode) {
-            // Update existing text
-            const textEl = existingNode.querySelector('.msg-bubble');
-            if (textEl) textEl.textContent = t.transcript;
-            return;
-        }
-
-        // Before appending official DB message, remove temporary zero-latency bubbles that match
+        // Before updating or appending official DB message, remove temporary zero-latency bubbles that match
         const tempBubbles = liveTranscriptContainer.querySelectorAll('.local-temp-bubble');
         tempBubbles.forEach(tb => {
             const tempRoleClass = tb.classList.contains('sent') ? 'user' : 'assistant';
@@ -367,6 +358,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         });
+
+        const existingNode = document.getElementById(`msg-${t.id}`);
+
+        if (existingNode) {
+            // Update existing text
+            const textEl = existingNode.querySelector('.msg-bubble');
+            if (textEl) textEl.textContent = t.transcript;
+            return;
+        }
 
         // Determine role
         const isUser = t.role === 'user' || t.role === 'customer';
